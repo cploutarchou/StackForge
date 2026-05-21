@@ -20,6 +20,13 @@ Install a specific release:
 curl -fsSL https://raw.githubusercontent.com/cploutarchou/StackForge/master/scripts/install-stackforge.sh | VERSION=v0.1.1 sh
 ```
 
+Installer options:
+
+- `INSTALL_DIR`: install directory, defaults to `/usr/local/bin`.
+- `VERSION`: release version, defaults to `latest`.
+- `STACKFORGE_REPO`: GitHub repository, defaults to `cploutarchou/StackForge`.
+- `VERIFY_CHECKSUM=false`: bypass checksum verification only when `sha256sum` is unavailable and the release source has been reviewed.
+
 Dry-run a single-node install:
 
 ```bash

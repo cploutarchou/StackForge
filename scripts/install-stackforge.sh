@@ -5,6 +5,7 @@ REPO="${STACKFORGE_REPO:-cploutarchou/StackForge}"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 BINARY_NAME="${BINARY_NAME:-stackforge}"
 VERSION="${VERSION:-latest}"
+VERIFY_CHECKSUM="${VERIFY_CHECKSUM:-true}"
 
 log() {
   printf '%s\n' "$*" >&2
@@ -22,6 +23,8 @@ need() {
 need uname
 need mktemp
 need tar
+need grep
+need install
 
 case "$(uname -s)" in
   Linux) os="linux" ;;
@@ -34,13 +37,17 @@ case "$(uname -m)" in
   *) fail "unsupported architecture: $(uname -m)" ;;
 esac
 
-if command -v curl >/dev/null 2>&1; then
-  fetch="curl -fsSL"
-elif command -v wget >/dev/null 2>&1; then
-  fetch="wget -qO-"
-else
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
   fail "curl or wget is required"
 fi
+
+fetch_url() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1"
+  else
+    wget -qO- "$1"
+  fi
+}
 
 asset="stackforge_${os}_${arch}.tar.gz"
 if [ "$VERSION" = "latest" ]; then
@@ -55,22 +62,37 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 log "Downloading StackForge ${VERSION} for ${os}/${arch}"
-$fetch "$url" > "$tmp/$asset"
-if command -v sha256sum >/dev/null 2>&1; then
-  $fetch "$checksum_url" > "$tmp/checksums.txt"
+if ! fetch_url "$url" > "$tmp/$asset"; then
+  fail "could not download ${asset} from ${url}"
+fi
+if [ ! -s "$tmp/$asset" ]; then
+  fail "downloaded ${asset} is empty"
+fi
+if [ "$VERIFY_CHECKSUM" = "true" ]; then
+  command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required for checksum verification; set VERIFY_CHECKSUM=false to bypass"
+  if ! fetch_url "$checksum_url" > "$tmp/checksums.txt"; then
+    fail "could not download checksums.txt from ${checksum_url}"
+  fi
   grep "  ${asset}$" "$tmp/checksums.txt" > "$tmp/checksum-line" || fail "checksum not found for ${asset}"
   (cd "$tmp" && sha256sum -c checksum-line >/dev/null) || fail "checksum verification failed"
 fi
 tar -xzf "$tmp/$asset" -C "$tmp"
 test -x "$tmp/stackforge" || fail "release archive did not contain executable stackforge"
 
-if [ -w "$INSTALL_DIR" ]; then
+if [ -d "$INSTALL_DIR" ] && [ -w "$INSTALL_DIR" ]; then
   install -m 0755 "$tmp/stackforge" "$INSTALL_DIR/$BINARY_NAME"
 elif command -v sudo >/dev/null 2>&1; then
+  sudo install -d -m 0755 "$INSTALL_DIR"
   sudo install -m 0755 "$tmp/stackforge" "$INSTALL_DIR/$BINARY_NAME"
 else
   fail "$INSTALL_DIR is not writable and sudo is unavailable"
 fi
 
-log "Installed $("$INSTALL_DIR/$BINARY_NAME" version 2>/dev/null || printf '%s' "$INSTALL_DIR/$BINARY_NAME")"
+test -x "$INSTALL_DIR/$BINARY_NAME" || fail "installed binary is not executable: $INSTALL_DIR/$BINARY_NAME"
+installed_version="$("$INSTALL_DIR/$BINARY_NAME" version 2>/dev/null || true)"
+if [ -z "$installed_version" ]; then
+  fail "installed binary did not run successfully"
+fi
+
+log "Installed StackForge ${installed_version} at $INSTALL_DIR/$BINARY_NAME"
 log "Run: $BINARY_NAME --help"

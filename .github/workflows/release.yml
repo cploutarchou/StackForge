@@ -1,0 +1,68 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, Test, and Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify
+        run: |
+          test -z "$(gofmt -l $(find . -name '*.go' -not -path './vendor/*'))"
+          go test ./...
+          go vet ./...
+
+      - name: Prepare release metadata
+        id: meta
+        run: |
+          version="v0.1.${GITHUB_RUN_NUMBER}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build release artifacts
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go build \
+              -ldflags="-s -w -X stackforge/internal/stackforge/cli.Version=${VERSION}" \
+              -o "dist/stackforge" ./cmd/stackforge
+            tar -C dist -czf "dist/stackforge_linux_${arch}.tar.gz" stackforge
+            rm -f dist/stackforge
+          done
+          cd dist
+          sha256sum stackforge_linux_*.tar.gz > checksums.txt
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          CREATED: ${{ steps.meta.outputs.created }}
+        run: |
+          set -euo pipefail
+          gh release create "$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "StackForge ${VERSION}" \
+            --notes "Automated StackForge release from master at ${GITHUB_SHA}. Created ${CREATED}." \
+            dist/stackforge_linux_amd64.tar.gz \
+            dist/stackforge_linux_arm64.tar.gz \
+            dist/checksums.txt

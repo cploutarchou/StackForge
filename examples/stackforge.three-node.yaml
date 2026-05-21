@@ -1,0 +1,46 @@
+cluster:
+  name: stackforge-production
+  environment: production
+  datacenter: dc1
+ssh:
+  user: root
+  port: 22
+  private_key_path: ~/.ssh/id_ed25519
+  copy_public_key: true
+nodes:
+  - name: node-1
+    address: 10.0.0.11
+    public_address: 203.0.113.11
+    roles: [consul-server, nomad-server, nomad-client, traefik, database, control-plane]
+  - name: node-2
+    address: 10.0.0.12
+    public_address: 203.0.113.12
+    roles: [consul-server, nomad-server, nomad-client]
+  - name: node-3
+    address: 10.0.0.13
+    public_address: 203.0.113.13
+    roles: [consul-server, nomad-server, nomad-client]
+network:
+  private_interface: eth1
+  public_interface: eth0
+  allowed_admin_cidrs: [1.2.3.4/32]
+  allowed_ssh_cidrs: [1.2.3.4/32]
+  allow_public_internal_communication: false
+consul: {version: latest-stable, acl_enabled: true, encrypt_gossip: true, ui_enabled: true}
+nomad: {version: latest-stable, acl_enabled: true, ui_enabled: true, client_enabled: true}
+traefik:
+  version: latest-stable
+  entrypoints: {web: 80, websecure: 443}
+  cert_resolver: letsencrypt
+  email: admin@example.com
+  dashboard_enabled: true
+  dashboard_domain: traefik.example.com
+  dashboard_basic_auth: true
+database: {engine: postgres, mode: single, backup_enabled: true, backup_schedule: '0 3 * * *'}
+control_plane:
+  domain: control.example.com
+  api_port: 8080
+  admin_api_keys: [change-me]
+  reconciler_enabled: true
+  reconciler_interval_seconds: 300
+cloudflare: {api_token_env: CLOUDFLARE_API_TOKEN, default_zone_id: optional}

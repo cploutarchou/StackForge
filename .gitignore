@@ -1,0 +1,50 @@
+# StackForge production ignore rules
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# Local StackForge state and generated reports
+.stackforge/
+stackforge-install-report.json
+STACKFORGE_INSTALL_REPORT.md
+install-report.json
+generated-secrets.yaml
+*.redacted.yaml
+
+# Build outputs
+bin/
+dist/
+build/
+coverage/
+*.out
+*.test
+*.prof
+
+# Staging/operator-local configs
+examples/stackforge.staging*.yaml
+examples/*.local.yaml
+examples/*.production.yaml
+
+# Agent and scratch artifacts
+.agents/
+.codex/
+*agent-prompt.md
+*.tmp
+*.bak
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/

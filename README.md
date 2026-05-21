@@ -46,3 +46,7 @@ STACKFORGE_ADMIN_API_KEYS="$(openssl rand -base64 32)" bin/stackforge serve
 ```
 
 Operator documentation starts in [`docs/STACKFORGE.md`](docs/STACKFORGE.md).
+
+## License
+
+StackForge is released under the [Apache License 2.0](LICENSE).

@@ -1,6 +1,12 @@
+<p align="center">
+  <img src="assets/stackforge-logo.svg" alt="StackForge logo" width="520">
+</p>
+
 # StackForge
 
-StackForge is a Go-based infrastructure and domain control plane for operating Nomad, Consul, Traefik, PostgreSQL, and domain routing infrastructure on Debian/Ubuntu servers.
+StackForge is a simple Go control plane for building and managing production-ready infrastructure.
+
+It helps developers and DevOps teams install, validate, and operate services like Nomad, Consul, Traefik, PostgreSQL, and domain routing on Debian or Ubuntu servers.
 
 Build:
 

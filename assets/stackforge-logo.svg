@@ -1,0 +1,13 @@
+<svg width="720" height="220" viewBox="0 0 720 220" xmlns="http://www.w3.org/2000/svg">
+  <rect width="720" height="220" rx="28" fill="#0B1120"/>
+  <rect x="54" y="116" width="132" height="42" rx="10" fill="#334155"/>
+  <rect x="72" y="79" width="132" height="42" rx="10" fill="#475569"/>
+  <rect x="90" y="42" width="132" height="42" rx="10" fill="#64748B"/>
+  <path d="M116 138L136 118L116 98" stroke="#38BDF8" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M146 138H184" stroke="#22C55E" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="208" cy="63" r="7" fill="#22C55E"/>
+  <circle cx="190" cy="100" r="7" fill="#38BDF8"/>
+  <circle cx="172" cy="137" r="7" fill="#F97316"/>
+  <text x="260" y="100" fill="#E5E7EB" font-family="Arial, sans-serif" font-size="48" font-weight="800">StackForge</text>
+  <text x="263" y="140" fill="#94A3B8" font-family="Arial, sans-serif" font-size="22" font-weight="500">Build. Validate. Ship infrastructure.</text>
+</svg>

@@ -69,7 +69,7 @@ func newRoot() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&rootOpts.allowPublicSSH, "allow-public-ssh", false, "allow allowed_ssh_cidrs to include 0.0.0.0/0")
 	cmd.PersistentFlags().BoolVar(&rootOpts.confirmProduction, "confirm-production", false, "allow live actions against production environment after validation")
 	_ = viper.BindPFlags(cmd.PersistentFlags())
-	cmd.AddCommand(versionCmd(), installCmd(), statusCmd(), inventoryCmd(), nodesCmd(), domainsCmd(), consulCmd(), nomadCmd(), traefikCmd(), dbCmd(), backupCmd(), rollbackCmd(), validateCmd(), verifyCmd(), upgradeCmd(), uninstallCmd(), serveCmd())
+	cmd.AddCommand(versionCmd(), installCmd(), statusCmd(), inventoryCmd(), nodesCmd(), componentsCmd(), firewallCmd(), domainsCmd(), consulCmd(), nomadCmd(), traefikCmd(), dbCmd(), backupCmd(), rollbackCmd(), validateCmd(), verifyCmd(), upgradeCmd(), uninstallCmd(), serveCmd())
 	return cmd
 }
 
@@ -210,6 +210,7 @@ func inventoryCmd() *cobra.Command {
 
 func nodesCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "nodes", Short: "Manage nodes"}
+	cmd.AddCommand(nodesBootstrapCmd(), nodesOnboardCmd())
 	cmd.AddCommand(&cobra.Command{Use: "list", RunE: func(cmd *cobra.Command, args []string) error {
 		inv, err := loadInventory()
 		if err != nil {
@@ -278,6 +279,7 @@ func nodesCmd() *cobra.Command {
 
 func domainsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "domains", Short: "Manage domains through the StackForge API"}
+	cmd.AddCommand(domainsPoolCmd())
 	var tenant, service string
 	var port int
 	add := &cobra.Command{Use: "add DOMAIN", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {

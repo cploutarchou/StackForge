@@ -13,6 +13,7 @@ type Rule struct {
 	Source   string `json:"source" yaml:"source"`
 	Purpose  string `json:"purpose" yaml:"purpose"`
 	Node     string `json:"node" yaml:"node"`
+	Role     string `json:"role" yaml:"role"`
 	Exposure string `json:"exposure" yaml:"exposure"`
 }
 
@@ -22,7 +23,15 @@ type Plan struct {
 	Warnings []string `json:"warnings" yaml:"warnings"`
 }
 
+type Options struct {
+	AllowPublicSSH bool
+}
+
 func BuildPlan(cfg *config.Config) (Plan, error) {
+	return BuildPlanWithOptions(cfg, Options{})
+}
+
+func BuildPlanWithOptions(cfg *config.Config, opts Options) (Plan, error) {
 	p := Plan{Mode: "ufw"}
 	sshCIDRs := cfg.Network.AllowedSSHCIDRs
 	if len(sshCIDRs) == 0 {
@@ -31,6 +40,16 @@ func BuildPlan(cfg *config.Config) (Plan, error) {
 	adminCIDRs := cfg.Network.AllowedAdminCIDRs
 	if len(adminCIDRs) == 0 {
 		return p, fmt.Errorf("allowed_admin_cidrs is required; refusing to expose admin APIs broadly")
+	}
+	for _, cidr := range adminCIDRs {
+		if cidr == "0.0.0.0/0" || cidr == "::/0" {
+			return p, fmt.Errorf("allowed_admin_cidrs must not include %s", cidr)
+		}
+	}
+	for _, cidr := range sshCIDRs {
+		if !opts.AllowPublicSSH && (cidr == "0.0.0.0/0" || cidr == "::/0") {
+			return p, fmt.Errorf("allowed_ssh_cidrs contains %s; use --allow-public-ssh only after explicit review", cidr)
+		}
 	}
 	nodes := []string{"all"}
 	if len(cfg.Nodes) > 0 {
@@ -41,18 +60,18 @@ func BuildPlan(cfg *config.Config) (Plan, error) {
 	}
 	for _, cidr := range sshCIDRs {
 		for _, node := range nodes {
-			p.Rules = append(p.Rules, Rule{Node: node, Port: cfg.SSH.Port, Protocol: "tcp", Source: cidr, Purpose: "SSH", Exposure: exposure(cidr)})
+			p.Rules = append(p.Rules, Rule{Node: node, Role: "ssh", Port: cfg.SSH.Port, Protocol: "tcp", Source: cidr, Purpose: "SSH", Exposure: exposure(cidr)})
 		}
 	}
 	for _, node := range nodes {
-		p.Rules = append(p.Rules, Rule{Node: node, Port: 80, Protocol: "tcp", Source: "0.0.0.0/0", Purpose: "public HTTP", Exposure: "public"})
-		p.Rules = append(p.Rules, Rule{Node: node, Port: 443, Protocol: "tcp", Source: "0.0.0.0/0", Purpose: "public HTTPS", Exposure: "public"})
+		p.Rules = append(p.Rules, Rule{Node: node, Role: "traefik", Port: 80, Protocol: "tcp", Source: "0.0.0.0/0", Purpose: "public HTTP", Exposure: "public"})
+		p.Rules = append(p.Rules, Rule{Node: node, Role: "traefik", Port: 443, Protocol: "tcp", Source: "0.0.0.0/0", Purpose: "public HTTPS", Exposure: "public"})
 	}
 	for _, cidr := range adminCIDRs {
 		for _, r := range []Rule{
-			{Port: cfg.ControlPlane.APIPort, Protocol: "tcp", Source: cidr, Purpose: "StackForge API", Exposure: exposure(cidr)},
-			{Port: 8500, Protocol: "tcp", Source: cidr, Purpose: "Consul HTTP/UI", Exposure: exposure(cidr)},
-			{Port: 4646, Protocol: "tcp", Source: cidr, Purpose: "Nomad HTTP/UI", Exposure: exposure(cidr)},
+			{Role: "control-plane", Port: cfg.ControlPlane.APIPort, Protocol: "tcp", Source: cidr, Purpose: "StackForge API", Exposure: exposure(cidr)},
+			{Role: "consul-server", Port: 8500, Protocol: "tcp", Source: cidr, Purpose: "Consul HTTP/UI", Exposure: exposure(cidr)},
+			{Role: "nomad-server", Port: 4646, Protocol: "tcp", Source: cidr, Purpose: "Nomad HTTP/UI", Exposure: exposure(cidr)},
 		} {
 			for _, node := range nodes {
 				r.Node = node
@@ -62,13 +81,13 @@ func BuildPlan(cfg *config.Config) (Plan, error) {
 	}
 	private := privateSource(cfg)
 	for _, r := range []Rule{
-		{Port: 8300, Protocol: "tcp", Source: private, Purpose: "Consul RPC", Exposure: "private"},
-		{Port: 8301, Protocol: "tcp/udp", Source: private, Purpose: "Consul LAN gossip", Exposure: "private"},
-		{Port: 8302, Protocol: "tcp/udp", Source: private, Purpose: "Consul WAN gossip", Exposure: "private"},
-		{Port: 8600, Protocol: "tcp/udp", Source: private, Purpose: "Consul DNS", Exposure: "private"},
-		{Port: 4647, Protocol: "tcp", Source: private, Purpose: "Nomad RPC", Exposure: "private"},
-		{Port: 4648, Protocol: "tcp/udp", Source: private, Purpose: "Nomad Serf", Exposure: "private"},
-		{Port: databasePort(cfg.Database.Engine), Protocol: "tcp", Source: private, Purpose: cfg.Database.Engine + " database private only", Exposure: "private"},
+		{Role: "consul-server", Port: 8300, Protocol: "tcp", Source: private, Purpose: "Consul RPC", Exposure: "private"},
+		{Role: "consul-server", Port: 8301, Protocol: "tcp/udp", Source: private, Purpose: "Consul LAN gossip", Exposure: "private"},
+		{Role: "consul-server", Port: 8302, Protocol: "tcp/udp", Source: private, Purpose: "Consul WAN gossip", Exposure: "private"},
+		{Role: "consul-server", Port: 8600, Protocol: "tcp/udp", Source: private, Purpose: "Consul DNS", Exposure: "private"},
+		{Role: "nomad-server", Port: 4647, Protocol: "tcp", Source: private, Purpose: "Nomad RPC", Exposure: "private"},
+		{Role: "nomad-server", Port: 4648, Protocol: "tcp/udp", Source: private, Purpose: "Nomad Serf", Exposure: "private"},
+		{Role: "database", Port: databasePort(cfg.Database.Engine), Protocol: "tcp", Source: private, Purpose: cfg.Database.Engine + " database private only", Exposure: "private"},
 	} {
 		for _, node := range nodes {
 			r.Node = node
@@ -78,7 +97,7 @@ func BuildPlan(cfg *config.Config) (Plan, error) {
 	if cfg.Traefik.DashboardEnabled {
 		for _, cidr := range adminCIDRs {
 			for _, node := range nodes {
-				p.Rules = append(p.Rules, Rule{Node: node, Port: 8080, Protocol: "tcp", Source: cidr, Purpose: "Traefik dashboard", Exposure: exposure(cidr)})
+				p.Rules = append(p.Rules, Rule{Node: node, Role: "traefik", Port: 8080, Protocol: "tcp", Source: cidr, Purpose: "Traefik dashboard", Exposure: exposure(cidr)})
 			}
 		}
 	}

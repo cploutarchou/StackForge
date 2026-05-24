@@ -33,6 +33,23 @@ func TestBuildPlanRequiresAdminCIDR(t *testing.T) {
 	}
 }
 
+func TestBuildPlanRejectsPublicAdminCIDR(t *testing.T) {
+	_, err := BuildPlan(&config.Config{SSH: config.SSHConfig{Port: 22}, Network: config.NetworkConfig{AllowedSSHCIDRs: []string{"1.2.3.4/32"}, AllowedAdminCIDRs: []string{"0.0.0.0/0"}}})
+	if err == nil {
+		t.Fatal("expected public admin CIDR rejection")
+	}
+}
+
+func TestBuildPlanRejectsPublicSSHUnlessOverride(t *testing.T) {
+	cfg := &config.Config{SSH: config.SSHConfig{Port: 22}, Nodes: []config.NodeConfig{{Name: "n1", Address: "10.0.0.11"}}, Network: config.NetworkConfig{AllowedSSHCIDRs: []string{"0.0.0.0/0"}, AllowedAdminCIDRs: []string{"1.2.3.4/32"}}, Database: config.DatabaseConfig{Engine: "postgres"}, ControlPlane: config.ControlPlaneConfig{APIPort: 8080}}
+	if _, err := BuildPlan(cfg); err == nil {
+		t.Fatal("expected public SSH rejection")
+	}
+	if _, err := BuildPlanWithOptions(cfg, Options{AllowPublicSSH: true}); err != nil {
+		t.Fatalf("expected override to allow public SSH, got %v", err)
+	}
+}
+
 func TestValidateRejectsPublicInternalExposure(t *testing.T) {
 	cases := []Rule{
 		{Port: 5432, Source: "0.0.0.0/0", Purpose: "postgres database"},

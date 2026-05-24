@@ -18,6 +18,7 @@ type Executor struct {
 	User           string
 	Port           int
 	PrivateKeyPath string
+	Password       string
 	Timeout        time.Duration
 }
 
@@ -28,14 +29,32 @@ func NewExecutor(user string, port int, keyPath string) *Executor {
 	return &Executor{User: user, Port: port, PrivateKeyPath: keyPath, Timeout: 30 * time.Second}
 }
 
-func (e *Executor) Run(ctx context.Context, node string, cmd remoteexec.Command) (remoteexec.Result, error) {
-	key, err := os.ReadFile(expandHome(e.PrivateKeyPath))
-	if err != nil {
-		return remoteexec.Result{}, err
+func NewPasswordExecutor(user string, port int, password string) *Executor {
+	if port == 0 {
+		port = 22
 	}
-	signer, err := ssh.ParsePrivateKey(key)
-	if err != nil {
-		return remoteexec.Result{}, err
+	return &Executor{User: user, Port: port, Password: password, Timeout: 30 * time.Second}
+}
+
+func (e *Executor) Run(ctx context.Context, node string, cmd remoteexec.Command) (remoteexec.Result, error) {
+	auth := []ssh.AuthMethod{}
+	if e.PrivateKeyPath != "" {
+		key, err := os.ReadFile(expandHome(e.PrivateKeyPath))
+		if err != nil {
+			return remoteexec.Result{}, err
+		}
+		signer, err := ssh.ParsePrivateKey(key)
+		if err != nil {
+			return remoteexec.Result{}, err
+		}
+		auth = append(auth, ssh.PublicKeys(signer))
+	}
+	if e.Password != "" {
+		auth = append(auth, ssh.Password(e.Password))
+		cmd.Secrets = append(cmd.Secrets, e.Password)
+	}
+	if len(auth) == 0 {
+		return remoteexec.Result{}, fmt.Errorf("ssh auth method is required")
 	}
 	timeout := e.Timeout
 	if cmd.Timeout > 0 {
@@ -43,7 +62,7 @@ func (e *Executor) Run(ctx context.Context, node string, cmd remoteexec.Command)
 	}
 	clientConfig := &ssh.ClientConfig{
 		User:            e.User,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		Auth:            auth,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         timeout,
 	}

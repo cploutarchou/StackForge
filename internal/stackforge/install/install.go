@@ -246,7 +246,7 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 
 func Plan(opts Options) ([]Step, []string, error) {
 	cfg := opts.Config
-	fw, err := firewall.BuildPlan(cfg)
+	fw, err := firewall.BuildPlanWithOptions(cfg, firewall.Options{AllowPublicSSH: opts.AllowPublicSSH})
 	if err != nil && !opts.AllowNoFirewall {
 		return nil, nil, err
 	}

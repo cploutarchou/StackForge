@@ -48,4 +48,4 @@ Thumbs.db
 *.swo
 .idea/
 .vscode/
-examples/stackforge.five-node.yaml
+config.yaml

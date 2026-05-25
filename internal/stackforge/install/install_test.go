@@ -2,6 +2,7 @@ package install
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -10,6 +11,8 @@ import (
 )
 
 func TestDryRunWritesInventorySecretsAndReport(t *testing.T) {
+	t.Chdir(t.TempDir())
+
 	cfg := &config.Config{
 		Cluster:      config.ClusterConfig{Name: "stackforge-production", Environment: "production", Datacenter: "dc1"},
 		SSH:          config.SSHConfig{User: "root", Port: 22, PrivateKeyPath: "~/.ssh/id_ed25519"},
@@ -28,7 +31,7 @@ func TestDryRunWritesInventorySecretsAndReport(t *testing.T) {
 		t.Fatal("expected steps")
 	}
 	for _, path := range []string{"inventory.yaml", "generated-secrets.yaml", "install-report.json"} {
-		if _, err := filepath.Abs(filepath.Join(state, path)); err != nil {
+		if _, err := os.Stat(filepath.Join(state, path)); err != nil {
 			t.Fatal(err)
 		}
 	}

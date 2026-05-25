@@ -256,8 +256,6 @@ Known roles:
 | `TRAEFIK_CERT_RESOLVER` | `letsencrypt` | no | Used by Traefik tag helper config. |
 | `TRAEFIK_ENTRYPOINT` | `websecure` | no | Used by Traefik tag helper config. |
 
-`.env.example` lists these variables.
-
 ## CLI Environment Variables
 
 Some CLI commands read environment variables directly.

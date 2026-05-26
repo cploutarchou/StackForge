@@ -51,11 +51,12 @@ func Run(ctx context.Context, stateDir string, inv *inventory.Inventory, exec re
 	}
 	verifyLocalState(stateDir, add)
 	for _, n := range inv.Nodes {
-		res, err := exec.Run(ctx, n.PrivateIP, remoteexec.Command{Command: Command(), Sudo: true, Timeout: 60 * time.Second})
-		if err != nil {
-			add(n.Name, "ssh", "fail", err.Error())
+		res, address, errText := runNodeCommand(ctx, exec, n)
+		if errText != "" {
+			add(n.Name, "ssh", "fail", errText)
 			continue
 		}
+		add(n.Name, "ssh", "ok", "verified via "+address)
 		data := parse(res.Stdout)
 		checkNode(n, data, add)
 	}
@@ -71,6 +72,40 @@ func Run(ctx context.Context, stateDir string, inv *inventory.Inventory, exec re
 		add("local", "uninstall-dry-run", "ok", "uninstall plan generated with preserve-data")
 	}
 	return report
+}
+
+func runNodeCommand(ctx context.Context, exec remoteexec.Executor, n inventory.Node) (remoteexec.Result, string, string) {
+	var errors []string
+	addresses := nodeAddresses(n)
+	if len(addresses) == 0 {
+		return remoteexec.Result{}, "", "node has no private or public address in inventory"
+	}
+	for _, addr := range addresses {
+		res, err := exec.Run(ctx, addr, remoteexec.Command{Command: Command(), Sudo: true, Timeout: 60 * time.Second})
+		if err == nil {
+			return res, addr, ""
+		}
+		msg := err.Error()
+		if strings.TrimSpace(res.Stderr) != "" {
+			msg += ": " + strings.TrimSpace(res.Stderr)
+		}
+		errors = append(errors, addr+" -> "+msg)
+	}
+	return remoteexec.Result{}, "", strings.Join(errors, "; ")
+}
+
+func nodeAddresses(n inventory.Node) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, addr := range []string{n.PrivateIP, n.PublicIP} {
+		addr = strings.TrimSpace(addr)
+		if addr == "" || seen[addr] {
+			continue
+		}
+		seen[addr] = true
+		out = append(out, addr)
+	}
+	return out
 }
 
 func Command() string {

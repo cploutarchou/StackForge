@@ -110,6 +110,11 @@ func exampleConfigValue(cfg *config.Config) string {
 			return value
 		}
 	}
+	for _, key := range cfg.ControlPlane.AdminAPIKeys {
+		if isPlaceholderSecret(key) {
+			return "control_plane.admin_api_keys"
+		}
+	}
 	return ""
 }
 
@@ -123,8 +128,13 @@ func isExampleIP(value string) bool {
 			return true
 		}
 	}
-	_, block, _ := net.ParseCIDR("203.0.113.0/24")
-	return block.Contains(ip)
+	for _, cidr := range []string{"192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"} {
+		_, block, _ := net.ParseCIDR(cidr)
+		if block.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func isExampleDomain(value string) bool {
@@ -133,7 +143,12 @@ func isExampleDomain(value string) bool {
 	v = strings.TrimPrefix(v, "https://")
 	host := strings.Split(v, "/")[0]
 	host = strings.Split(host, ":")[0]
-	return host == "example.com" || strings.HasSuffix(host, ".example.com")
+	return host == "example.com" || strings.HasSuffix(host, ".example.com") || host == "example.org" || strings.HasSuffix(host, ".example.org") || host == "example.net" || strings.HasSuffix(host, ".example.net") || strings.Contains(host, "change-me")
+}
+
+func isPlaceholderSecret(value string) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	return v == "" || v == "change-me" || strings.Contains(v, "example") || strings.Contains(v, "demo")
 }
 
 func containsCIDR(values []string, target string) bool {

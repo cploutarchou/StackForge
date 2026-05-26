@@ -11,6 +11,18 @@ import (
 	"time"
 )
 
+type APIError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e APIError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("cloudflare returned status %d: %s", e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("cloudflare returned status %d", e.StatusCode)
+}
+
 type Client struct {
 	Token      string
 	BaseURL    string
@@ -133,9 +145,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	}
 	if resp.StatusCode >= 300 || (len(respBody) > 0 && !env.Success) {
 		if len(env.Errors) > 0 {
-			return fmt.Errorf("cloudflare returned status %d: %s", resp.StatusCode, env.Errors[0].Message)
+			return APIError{StatusCode: resp.StatusCode, Message: env.Errors[0].Message}
 		}
-		return fmt.Errorf("cloudflare returned status %d", resp.StatusCode)
+		return APIError{StatusCode: resp.StatusCode}
 	}
 	if out != nil && len(env.Result) > 0 {
 		return json.Unmarshal(env.Result, out)

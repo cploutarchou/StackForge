@@ -682,7 +682,8 @@ func backupDirCommand(dir string) string {
 }
 
 func writeBase64Command(path, body, mode string) string {
-	return "printf %s " + shellQuote(base64.StdEncoding.EncodeToString([]byte(body))) + " | base64 -d > " + shellQuote(path) + " && chmod " + shellQuote(mode) + " " + shellQuote(path)
+	dir := filepath.Dir(path)
+	return "tmp=$(mktemp " + shellQuote(filepath.Join(dir, ".stackforge.tmp.XXXXXX")) + ") && printf %s " + shellQuote(base64.StdEncoding.EncodeToString([]byte(body))) + " | base64 -d > \"$tmp\" && chmod " + shellQuote(mode) + " \"$tmp\" && mv \"$tmp\" " + shellQuote(path)
 }
 
 func firewallDryRun(plan firewall.Plan) string {

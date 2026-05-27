@@ -18,6 +18,15 @@ func TestValidateAcceptsSingleNode(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsSQLiteWithoutDatabaseRole(t *testing.T) {
+	cfg := validConfig()
+	cfg.Database.Engine = "sqlite"
+	cfg.Nodes[0].Roles = []string{"consul-server", "nomad-server", "nomad-client", "traefik", "control-plane"}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("validate sqlite no-database-role: %v", err)
+	}
+}
+
 func validConfig() *Config {
 	return &Config{
 		Cluster:      ClusterConfig{Name: "stackforge-production", Environment: "production", Datacenter: "dc1"},

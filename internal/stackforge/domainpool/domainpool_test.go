@@ -2,12 +2,14 @@ package domainpool
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"stackforge/internal/controlplane/dns/cloudflare"
 )
@@ -15,13 +17,20 @@ import (
 type fakeResolver struct {
 	hosts []string
 	cname string
+	err   error
 }
 
 func (f fakeResolver) LookupHost(ctx context.Context, host string) ([]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	return f.hosts, nil
 }
 
 func (f fakeResolver) LookupCNAME(ctx context.Context, host string) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
 	return f.cname, nil
 }
 
@@ -106,5 +115,80 @@ func TestVerifyDNSMocked(t *testing.T) {
 	}
 	if e.DNSStatus != "verified" || e.VerificationStatus != "verified" {
 		t.Fatalf("unexpected verification status: %+v", e)
+	}
+}
+
+func TestVerifyDNSWithMultipleResolversReportsMismatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pool.yaml")
+	if _, err := Add(path, Entry{Domain: "example.com", TargetType: "traefik", TargetValue: "203.0.113.10", RecordType: "A"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	_, err := VerifyDNSWithOptions(context.Background(), VerifyOptions{
+		Path:          path,
+		Domain:        "example.com",
+		Resolvers:     []Resolver{fakeResolver{hosts: []string{"203.0.113.10"}}, fakeResolver{hosts: []string{"203.0.113.11"}}},
+		ResolverNames: []string{"good", "stale"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "stale") || !strings.Contains(err.Error(), "want 203.0.113.10") {
+		t.Fatalf("expected resolver-specific mismatch, got %v", err)
+	}
+}
+
+func TestVerifyDNSWithResolverError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pool.yaml")
+	if _, err := Add(path, Entry{Domain: "example.com", TargetType: "traefik", TargetValue: "203.0.113.10", RecordType: "A"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	_, err := VerifyDNSWithOptions(context.Background(), VerifyOptions{Path: path, Domain: "example.com", Resolvers: []Resolver{fakeResolver{err: errors.New("resolver unavailable")}}, ResolverNames: []string{"1.1.1.1"}})
+	if err == nil || !strings.Contains(err.Error(), "1.1.1.1") {
+		t.Fatalf("expected resolver error with resolver name, got %v", err)
+	}
+}
+
+func TestApplyDNSCloudflareForbiddenAddsRemediationHint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pool.yaml")
+	if _, err := Add(path, Entry{Domain: "app.example.com", TargetType: "traefik", TargetValue: "203.0.113.10", RecordType: "A", ZoneID: "zone1"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"success":false,"errors":[{"message":"request not allowed from this IP"}]}`))
+	}))
+	defer srv.Close()
+	e, err := ApplyDNS(context.Background(), "app.example.com", ApplyOptions{Path: path, Client: &cloudflare.Client{Token: "token", BaseURL: srv.URL, HTTPClient: srv.Client()}})
+	if err == nil || !strings.Contains(err.Error(), "token IP restrictions") {
+		t.Fatalf("expected 403 remediation hint, got %v", err)
+	}
+	if !strings.Contains(e.LastError, "token IP restrictions") {
+		t.Fatalf("expected hint in LastError, got %q", e.LastError)
+	}
+}
+
+func TestApplyDNSRetriesCloudflareRateLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pool.yaml")
+	if _, err := Add(path, Entry{Domain: "app.example.com", TargetType: "traefik", TargetValue: "203.0.113.10", RecordType: "A", ZoneID: "zone1"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/zones/zone1/dns_records" {
+			attempts++
+			if attempts == 1 {
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"success":false,"errors":[{"message":"rate limited"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"success":true,"result":[{"id":"rec1","type":"A","name":"app.example.com","content":"203.0.113.10","proxied":false}]}`))
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	defer srv.Close()
+	e, err := ApplyDNS(context.Background(), "app.example.com", ApplyOptions{Path: path, Client: &cloudflare.Client{Token: "token", BaseURL: srv.URL, HTTPClient: srv.Client()}, MaxRetries: 1, RetryDelay: time.Nanosecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 3 || e.DNSStatus != "applied" {
+		t.Fatalf("expected retry and applied status, attempts=%d entry=%+v", attempts, e)
 	}
 }

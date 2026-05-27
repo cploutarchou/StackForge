@@ -15,14 +15,14 @@ func TestCheckRefusalPaths(t *testing.T) {
 		code string
 	}{
 		{
-			name: "example IP",
-			edit: func(cfg *config.Config) { cfg.Nodes[0].Address = "10.0.0.11" },
+			name: "documentation private IP range",
+			edit: func(cfg *config.Config) { cfg.Nodes[0].Address = "203.0.113.11" },
 			opts: Options{Live: true, ConfirmProduction: true},
 			code: "example-config",
 		},
 		{
 			name: "documentation IP range",
-			edit: func(cfg *config.Config) { cfg.Nodes[0].PublicAddress = "203.0.113.25" },
+			edit: func(cfg *config.Config) { cfg.Nodes[0].PublicAddress = "198.51.100.25" },
 			opts: Options{Live: true, ConfirmProduction: true},
 			code: "example-config",
 		},
@@ -37,6 +37,12 @@ func TestCheckRefusalPaths(t *testing.T) {
 			edit: func(cfg *config.Config) { cfg.Cluster.Name = "stackforge-demo" },
 			opts: Options{Live: true, ConfirmProduction: true},
 			code: "example-cluster-name",
+		},
+		{
+			name: "change-me admin key",
+			edit: func(cfg *config.Config) { cfg.ControlPlane.AdminAPIKeys = []string{"change-me"} },
+			opts: Options{Live: true, ConfirmProduction: true},
+			code: "example-config",
 		},
 		{
 			name: "production without confirmation",
@@ -118,6 +124,16 @@ func TestCheckWarnsForRootSSH(t *testing.T) {
 	}
 }
 
+func TestCheckAllowsRFC1918PrivateIPs(t *testing.T) {
+	cfg := safeConfig()
+	cfg.Nodes[0].Address = "10.0.0.11"
+	cfg.Nodes[0].PublicAddress = "159.195.82.201"
+	report := Check(cfg, Options{Live: true, ConfirmProduction: true})
+	if hasCode(report, "example-config") {
+		t.Fatalf("did not expect example-config for RFC1918 address: %+v", report.Findings)
+	}
+}
+
 func safeConfig() *config.Config {
 	return &config.Config{
 		Cluster: config.ClusterConfig{Name: "stackforge-staging", Environment: "staging", Datacenter: "dc1"},
@@ -125,7 +141,7 @@ func safeConfig() *config.Config {
 		Nodes: []config.NodeConfig{{
 			Name:          "node-1",
 			Address:       "10.20.0.11",
-			PublicAddress: "198.51.100.11",
+			PublicAddress: "93.184.216.34",
 			Roles:         []string{"consul-server", "nomad-server", "nomad-client", "traefik", "database", "control-plane"},
 		}},
 		Network: config.NetworkConfig{

@@ -277,7 +277,6 @@ func nodesCmd() *cobra.Command {
 	}})
 	return cmd
 }
-
 func domainsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "domains", Short: "Manage domains through the StackForge API"}
 	cmd.AddCommand(domainsPoolCmd())

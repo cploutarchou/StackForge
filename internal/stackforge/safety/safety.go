@@ -123,11 +123,6 @@ func isExampleIP(value string) bool {
 	if ip == nil {
 		return false
 	}
-	for _, exact := range []string{"10.0.0.11", "10.0.0.12", "10.0.0.13"} {
-		if ip.Equal(net.ParseIP(exact)) {
-			return true
-		}
-	}
 	for _, cidr := range []string{"192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"} {
 		_, block, _ := net.ParseCIDR(cidr)
 		if block.Contains(ip) {

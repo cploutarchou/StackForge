@@ -37,11 +37,19 @@ func NewPersistent(ctx context.Context, cfg cpconfig.Config, logger *slog.Logger
 	}
 	store := domain.Repository(domain.NewStore())
 	if cfg.DatabaseURL != "" {
-		pg, err := domain.NewPostgresStore(ctx, cfg.DatabaseURL)
-		if err != nil {
-			return nil, err
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(cfg.DatabaseURL)), "sqlite:") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(cfg.DatabaseURL)), "file:") || strings.HasSuffix(strings.ToLower(strings.TrimSpace(cfg.DatabaseURL)), ".db") {
+			sqliteStore, err := domain.NewSQLiteStore(ctx, cfg.DatabaseURL)
+			if err != nil {
+				return nil, err
+			}
+			store = sqliteStore
+		} else {
+			pg, err := domain.NewPostgresStore(ctx, cfg.DatabaseURL)
+			if err != nil {
+				return nil, err
+			}
+			store = pg
 		}
-		store = pg
 	}
 	return &Server{cfg: cfg, auth: auth.New(cfg.AdminAPIKeys), store: store, log: logger}, nil
 }

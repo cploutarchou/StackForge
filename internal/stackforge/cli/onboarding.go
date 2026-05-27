@@ -24,6 +24,7 @@ import (
 	"stackforge/internal/stackforge/inventory"
 	"stackforge/internal/stackforge/remoteexec"
 	sfssh "stackforge/internal/stackforge/ssh"
+	sfvalidate "stackforge/internal/stackforge/validate"
 	sfverify "stackforge/internal/stackforge/verify"
 )
 
@@ -94,6 +95,8 @@ func nodesOnboardCmd() *cobra.Command {
 
 type onboardOptions struct {
 	CopySSHKey        bool
+	InstallBase       bool
+	RunPreflight      bool
 	InstallDocker     bool
 	ApplyFirewall     bool
 	InstallComponents bool
@@ -106,7 +109,7 @@ func onboardPlanFromInput() (*config.Config, []bootstrap.Node, onboardOptions, e
 			return nil, nil, onboardOptions{}, err
 		}
 		nodes := bootstrapNodesFromConfig(cfg, bootstrap.AuthPrivateKey, "~/.ssh/id_ed25519.pub")
-		return cfg, nodes, onboardOptions{CopySSHKey: cfg.SSH.CopyPublicKey, InstallDocker: true, ApplyFirewall: !rootOpts.allowNoFirewall, InstallComponents: true}, nil
+		return cfg, nodes, onboardOptions{CopySSHKey: cfg.SSH.CopyPublicKey, InstallBase: true, RunPreflight: true, InstallDocker: true, ApplyFirewall: !rootOpts.allowNoFirewall, InstallComponents: true}, nil
 	}
 	if !isTerminal() {
 		return nil, nil, onboardOptions{}, fmt.Errorf("nodes onboard requires --config or an interactive TTY")
@@ -121,6 +124,7 @@ func onboardPlanFromInput() (*config.Config, []bootstrap.Node, onboardOptions, e
 	if err != nil {
 		return nil, nil, onboardOptions{}, err
 	}
+	copyKey := askBool(reader, "Perform SSH key setup/copy for these servers?", true)
 	var nodes []config.NodeConfig
 	var boot []bootstrap.Node
 	for i := 0; i < count; i++ {
@@ -133,13 +137,23 @@ func onboardPlanFromInput() (*config.Config, []bootstrap.Node, onboardOptions, e
 		if err != nil {
 			return nil, nil, onboardOptions{}, err
 		}
-		auth := ask(reader, "Authentication method (password/private-key)", bootstrap.AuthPrivateKey)
+		passwordFirst := askBool(reader, "Is password-based SSH needed first for this server?", false)
+		auth := bootstrap.AuthPrivateKey
+		if passwordFirst {
+			auth = bootstrap.AuthPassword
+		} else {
+			auth = ask(reader, "Authentication method (private-key/password)", bootstrap.AuthPrivateKey)
+		}
 		roles := splitList(ask(reader, "Roles (comma separated)", "consul-server,nomad-server,nomad-client,traefik,database,control-plane,docker-host"))
-		pubKey := ask(reader, "Local public SSH key path", "~/.ssh/id_ed25519.pub")
+		pubKey := "~/.ssh/id_ed25519.pub"
+		if copyKey {
+			pubKey = ask(reader, "Local public SSH key path", pubKey)
+		}
 		nodes = append(nodes, config.NodeConfig{Name: name, Address: private, PublicAddress: public, Roles: roles})
 		boot = append(boot, bootstrap.Node{Name: name, Address: public, PrivateIP: private, User: user, Port: port, Auth: auth, PublicKeyPath: pubKey, Roles: roles})
 	}
-	copyKey := askBool(reader, "Should StackForge copy your local public SSH key?", true)
+	installBase := askBool(reader, "Install missing base packages and firewall tooling?", true)
+	runPreflight := askBool(reader, "Validate SSH, OS, ports, firewall, and required components before install?", true)
 	installDocker := askBool(reader, "Install Docker when missing?", true)
 	applyFirewall := askBool(reader, "Apply firewall rules?", true)
 	installComponents := askBool(reader, "Install required StackForge components immediately?", true)
@@ -152,7 +166,7 @@ func onboardPlanFromInput() (*config.Config, []bootstrap.Node, onboardOptions, e
 		ControlPlane: config.ControlPlaneConfig{Domain: controlDomain, APIPort: 8080, AdminAPIKeys: []string{"generated-by-install"}},
 		Traefik:      config.TraefikConfig{DashboardEnabled: false},
 	}
-	return cfg, boot, onboardOptions{CopySSHKey: copyKey, InstallDocker: installDocker, ApplyFirewall: applyFirewall, InstallComponents: installComponents}, nil
+	return cfg, boot, onboardOptions{CopySSHKey: copyKey, InstallBase: installBase, RunPreflight: runPreflight, InstallDocker: installDocker, ApplyFirewall: applyFirewall, InstallComponents: installComponents}, nil
 }
 
 func runOnboard(cfg *config.Config, bootNodes []bootstrap.Node, opts onboardOptions) error {
@@ -164,6 +178,32 @@ func runOnboard(cfg *config.Config, bootNodes []bootstrap.Node, opts onboardOpti
 		}
 		if err != nil {
 			return err
+		}
+	}
+	if opts.InstallBase {
+		inv := inventoryFromConfig(cfg)
+		if !rootOpts.dryRun {
+			if existing, err := inventory.Load(filepath.Join(state, "inventory.yaml")); err == nil {
+				inv = existing
+			}
+		}
+		items, err := components.RunInstall(context.Background(), inv, executorForConfig(cfg), components.BasePackages, "", rootOpts.dryRun)
+		if err != nil && !rootOpts.dryRun {
+			return err
+		}
+		for _, item := range items {
+			if rootOpts.output != "json" {
+				fmt.Printf("[%s] %s install %s\n", strings.ToUpper(valueOr(item.Status, "planned")), item.Node, item.Component)
+			}
+		}
+	}
+	if opts.RunPreflight {
+		report := sfvalidate.RunWithOptions(context.Background(), cfg, executorForConfig(cfg), sfvalidate.Options{DryRun: rootOpts.dryRun, Live: !rootOpts.dryRun, Production: strings.EqualFold(cfg.Cluster.Environment, "production"), AllowNoFirewall: !opts.ApplyFirewall || rootOpts.allowNoFirewall, AllowExampleConfig: rootOpts.allowExampleConfig, AllowPublicSSH: rootOpts.allowPublicSSH, ConfirmProduction: rootOpts.confirmProduction})
+		if rootOpts.output != "json" {
+			printValidationText(report)
+		}
+		if !report.Safe && !rootOpts.dryRun {
+			return fmt.Errorf("server preflight failed")
 		}
 	}
 	if opts.InstallDocker {
@@ -334,6 +374,7 @@ func domainsPoolCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "pool", Short: "Manage the StackForge domain pool"}
 	var target, targetValue, recordType, zoneID string
 	var proxied, allowInternal, allowWildcard bool
+	var resolvers []string
 	add := &cobra.Command{Use: "add DOMAIN", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		e, err := domainpool.Add(domainPoolPath(), domainpool.Entry{Domain: args[0], TargetType: target, TargetValue: targetValue, RecordType: recordType, ZoneID: zoneID, Proxied: proxied}, allowInternal, allowWildcard)
 		return printJSONOrOutput(e, err)
@@ -374,11 +415,40 @@ func domainsPoolCmd() *cobra.Command {
 		e, err := domainpool.ApplyDNS(context.Background(), args[0], domainpool.ApplyOptions{Path: domainPoolPath(), AuditPath: domainPoolAuditPath(), DryRun: rootOpts.dryRun, Client: &cloudflare.Client{Token: os.Getenv("CLOUDFLARE_API_TOKEN")}})
 		return printJSONOrOutput(e, err)
 	}})
-	cmd.AddCommand(&cobra.Command{Use: "verify-dns DOMAIN", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		e, err := domainpool.VerifyDNS(context.Background(), domainPoolPath(), args[0], nil)
-		return printJSONOrOutput(e, err)
+	cmd.AddCommand(&cobra.Command{Use: "apply-all", RunE: func(cmd *cobra.Command, args []string) error {
+		if !rootOpts.yes && !rootOpts.dryRun {
+			if err := confirmText("apply dns for domain pool"); err != nil {
+				return err
+			}
+		}
+		result, err := domainpool.ApplyAll(context.Background(), domainpool.ApplyOptions{Path: domainPoolPath(), AuditPath: domainPoolAuditPath(), DryRun: rootOpts.dryRun, Client: &cloudflare.Client{Token: os.Getenv("CLOUDFLARE_API_TOKEN")}})
+		return printJSONOrOutput(result, err)
 	}})
+	verify := &cobra.Command{Use: "verify-dns DOMAIN", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		resolverList, names := resolverOptions(resolvers)
+		e, err := domainpool.VerifyDNSWithOptions(context.Background(), domainpool.VerifyOptions{Path: domainPoolPath(), Domain: args[0], Resolvers: resolverList, ResolverNames: names})
+		return printJSONOrOutput(e, err)
+	}}
+	verify.Flags().StringArrayVar(&resolvers, "resolver", nil, "DNS resolver IP to query directly; repeat for consensus checks")
+	cmd.AddCommand(verify)
 	return cmd
+}
+
+func resolverOptions(values []string) ([]domainpool.Resolver, []string) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	resolvers := make([]domainpool.Resolver, 0, len(values))
+	names := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		resolvers = append(resolvers, domainpool.DNSResolver{Address: value})
+		names = append(names, value)
+	}
+	return resolvers, names
 }
 
 func bootstrapNodesFromFlags(specs []string, user string, port int, auth string, publicKey string) ([]bootstrap.Node, error) {
@@ -516,7 +586,7 @@ func printOnboardPlan(cfg *config.Config, opts onboardOptions) {
 	for _, n := range cfg.Nodes {
 		fmt.Printf("- %s private=%s public=%s roles=%s\n", n.Name, n.Address, n.PublicAddress, strings.Join(n.Roles, ","))
 	}
-	fmt.Printf("copy_ssh_key=%t install_docker=%t apply_firewall=%t install_components=%t dry_run=%t\n", opts.CopySSHKey, opts.InstallDocker, opts.ApplyFirewall, opts.InstallComponents, rootOpts.dryRun)
+	fmt.Printf("copy_ssh_key=%t install_base=%t run_preflight=%t install_docker=%t apply_firewall=%t install_components=%t dry_run=%t\n", opts.CopySSHKey, opts.InstallBase, opts.RunPreflight, opts.InstallDocker, opts.ApplyFirewall, opts.InstallComponents, rootOpts.dryRun)
 }
 
 func inventoryFromConfig(cfg *config.Config) *inventory.Inventory {

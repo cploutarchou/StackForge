@@ -146,6 +146,7 @@ func StatusCommand() string {
 echo "docker_installed=$(command -v docker >/dev/null 2>&1 && echo yes || echo no)"
 echo "docker_version=$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
 echo "docker_service=$(systemctl is-active docker 2>/dev/null || true)"
+echo "docker_compose=$(docker compose version --short 2>/dev/null || true)"
 echo "consul_installed=$(command -v consul >/dev/null 2>&1 && echo yes || echo no)"
 echo "consul_version=$(consul version 2>/dev/null | head -n1 | awk '{print $2}')"
 echo "consul_service=$(systemctl is-active consul 2>/dev/null || true)"
@@ -186,6 +187,9 @@ func componentStatus(node, component, installed, version, service string, ports 
 	s := Status{Node: node, Component: component, Installed: installed == "yes", Version: version, Systemd: service, Ports: ports, Raw: raw}
 	if s.Installed && service != "" && service != "active" {
 		s.Warnings = append(s.Warnings, "installed but systemd service is not active")
+	}
+	if component == Docker && s.Installed && strings.TrimSpace(raw["docker_compose"]) == "" {
+		s.Warnings = append(s.Warnings, "Docker Compose plugin is missing")
 	}
 	return s
 }

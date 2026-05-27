@@ -25,6 +25,7 @@ import (
 	"stackforge/internal/stackforge/safety"
 	sfssh "stackforge/internal/stackforge/ssh"
 	"stackforge/internal/stackforge/status"
+	"stackforge/internal/stackforge/traefiklint"
 	"stackforge/internal/stackforge/uninstall"
 	"stackforge/internal/stackforge/upgrade"
 	sfvalidate "stackforge/internal/stackforge/validate"
@@ -69,7 +70,7 @@ func newRoot() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&rootOpts.allowPublicSSH, "allow-public-ssh", false, "allow allowed_ssh_cidrs to include 0.0.0.0/0")
 	cmd.PersistentFlags().BoolVar(&rootOpts.confirmProduction, "confirm-production", false, "allow live actions against production environment after validation")
 	_ = viper.BindPFlags(cmd.PersistentFlags())
-	cmd.AddCommand(versionCmd(), installCmd(), statusCmd(), inventoryCmd(), nodesCmd(), componentsCmd(), firewallCmd(), domainsCmd(), consulCmd(), nomadCmd(), traefikCmd(), dbCmd(), backupCmd(), rollbackCmd(), validateCmd(), verifyCmd(), upgradeCmd(), uninstallCmd(), serveCmd())
+	cmd.AddCommand(versionCmd(), installCmd(), statusCmd(), inventoryCmd(), nodesCmd(), componentsCmd(), firewallCmd(), domainsCmd(), consulCmd(), nomadCmd(), traefikCmd(), dbCmd(), backupCmd(), rollbackCmd(), validateCmd(), verifyCmd(), contextCmd(), upgradeCmd(), uninstallCmd(), serveCmd())
 	return cmd
 }
 
@@ -341,6 +342,16 @@ func traefikCmd() *cobra.Command {
 	for _, n := range []string{"status", "routes", "reload", "logs"} {
 		cmd.AddCommand(&cobra.Command{Use: n, RunE: refuseLive("traefik " + n)})
 	}
+	cmd.AddCommand(&cobra.Command{Use: "lint-config PATH", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if err := traefiklint.LintFile(args[0]); err != nil {
+			return err
+		}
+		if rootOpts.output == "json" {
+			return output(map[string]any{"path": args[0], "valid": true})
+		}
+		fmt.Printf("[OK] %s\n", args[0])
+		return nil
+	}})
 	return cmd
 }
 

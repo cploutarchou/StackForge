@@ -99,10 +99,12 @@ func RunWithOptions(ctx context.Context, cfg *config.Config, exec remoteexec.Exe
 			add(n.Name, "sudo", "planned", "would verify non-interactive sudo/root")
 			add(n.Name, "systemd", "planned", "would verify systemd/systemctl")
 			add(n.Name, "package-manager", "planned", "would verify apt-get")
+			add(n.Name, "base-packages", "planned", "would verify required packages: curl jq ufw openssl iproute2 tar gzip")
+			add(n.Name, "docker", "planned", "would detect Docker engine and Compose plugin")
 			add(n.Name, "disk", "planned", "would verify at least 20 GiB free on /")
 			add(n.Name, "ram", "planned", "would verify at least 2 GiB RAM")
 			add(n.Name, "ports", "planned", "would verify required ports are free")
-			add(n.Name, "firewall", "planned", "would require UFW or explicit --allow-no-firewall")
+			add(n.Name, "firewall", "planned", "would require UFW and report whether it is active")
 			if cfg.Network.PrivateInterface != "" {
 				add(n.Name, "private-interface", "planned", "would verify "+cfg.Network.PrivateInterface)
 			}
@@ -128,9 +130,13 @@ echo "os=$(. /etc/os-release 2>/dev/null; echo ${ID:-unknown}:${VERSION_ID:-unkn
 echo "sudo=$(if [ "$(id -u)" = 0 ] || sudo -n true >/dev/null 2>&1; then echo ok; else echo fail; fi)"
 echo "apt=$(if command -v apt-get >/dev/null 2>&1; then echo ok; else echo fail; fi)"
 echo "systemd=$(if command -v systemctl >/dev/null 2>&1 && test -d /run/systemd/system; then echo ok; else echo fail; fi)"
+echo "base_packages=$(missing=''; for p in curl jq ufw openssl iproute2 tar gzip ca-certificates gnupg lsb-release; do dpkg -s "$p" >/dev/null 2>&1 || missing="$missing,$p"; done; echo "${missing#,}")"
+echo "docker=$(if command -v docker >/dev/null 2>&1 && docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then echo ok; else echo missing; fi)"
+echo "docker_compose=$(if docker compose version >/dev/null 2>&1; then echo ok; else echo missing; fi)"
 echo "disk_mb=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}')"
 echo "ram_mb=$(awk '/MemTotal/ {printf "%%d", $2/1024}' /proc/meminfo 2>/dev/null)"
 echo "firewall=$(if command -v ufw >/dev/null 2>&1; then echo ufw; elif command -v nft >/dev/null 2>&1; then echo nftables; else echo none; fi)"
+echo "firewall_active=$(if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q active; then echo yes; else echo no; fi)"
 echo "ports=$(ss -ltnH 2>/dev/null | awk '{print $4}' | tr '\n' ',' | sed 's/,$//')"
 echo "private_ip=$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo "private_interface=$(if [ -z %s ] || ip link show dev %s >/dev/null 2>&1; then echo ok; else echo fail; fi)"
@@ -146,7 +152,7 @@ func parsePreflight(node, stdout string, allowNoFirewall bool, add func(string, 
 		}
 	}
 	switch osID := data["os"]; {
-	case strings.HasPrefix(osID, "debian:12") || strings.HasPrefix(osID, "debian:13") || strings.HasPrefix(osID, "ubuntu:22.04") || strings.HasPrefix(osID, "ubuntu:24.04"):
+	case strings.HasPrefix(osID, "debian:12") || strings.HasPrefix(osID, "debian:13") || strings.HasPrefix(osID, "ubuntu:22.04") || strings.HasPrefix(osID, "ubuntu:24.04") || strings.HasPrefix(osID, "ubuntu:26.04"):
 		add(node, "os", "ok", osID)
 	default:
 		add(node, "os", "fail", "unsupported OS "+osID)
@@ -166,6 +172,21 @@ func parsePreflight(node, stdout string, allowNoFirewall bool, add func(string, 
 	} else {
 		add(node, "systemd", "fail", "systemd/systemctl is required")
 	}
+	if data["base_packages"] == "" {
+		add(node, "base-packages", "ok", "required packages installed")
+	} else {
+		add(node, "base-packages", "warn", "missing packages can be installed by onboarding/install: "+data["base_packages"])
+	}
+	if data["docker"] == "ok" {
+		add(node, "docker", "ok", "Docker engine available")
+	} else {
+		add(node, "docker", "warn", "Docker engine missing; onboarding can install it")
+	}
+	if data["docker_compose"] == "ok" {
+		add(node, "docker-compose", "ok", "Docker Compose plugin available")
+	} else {
+		add(node, "docker-compose", "warn", "Docker Compose plugin missing; Docker preparation can install it")
+	}
 	if parseInt(data["disk_mb"]) >= 20480 {
 		add(node, "disk", "ok", data["disk_mb"]+" MiB free on /")
 	} else {
@@ -178,7 +199,11 @@ func parsePreflight(node, stdout string, allowNoFirewall bool, add func(string, 
 	}
 	switch data["firewall"] {
 	case "ufw":
-		add(node, "firewall", "ok", "ufw available")
+		if data["firewall_active"] == "yes" {
+			add(node, "firewall", "ok", "ufw active")
+		} else {
+			add(node, "firewall", "warn", "ufw is installed but inactive; install/firewall apply will enable it")
+		}
 	case "nftables":
 		if allowNoFirewall {
 			add(node, "firewall", "warn", "nftables-only detected; StackForge firewall management bypassed")

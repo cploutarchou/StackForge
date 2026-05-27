@@ -115,8 +115,8 @@ echo "stackforge_health=$(curl -fsS http://127.0.0.1:8080/health 2>/dev/null | t
 echo "stackforge_api_code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v1/domains 2>/dev/null || true)"
 echo "postgres_service=$(systemctl is-active postgresql 2>/dev/null || true)"
 echo "postgres_query=$(sudo -u postgres psql -d stackforge -tAc 'SELECT 1' 2>/dev/null | xargs || true)"
-echo "postgres_migrations=$(sudo -u postgres psql -d stackforge -tAc \"SELECT to_regclass('public.domains') IS NOT NULL\" 2>/dev/null | xargs || true)"
-echo "postgres_public=$(ss -ltnp 2>/dev/null | grep -E ':5432 .*0\.0\.0\.0|:5432 .*:::' >/dev/null && echo yes || echo no)"
+echo "postgres_migrations=$(sudo -u postgres psql -d stackforge -tAc 'SELECT to_regclass($$public.domains$$) IS NOT NULL' 2>/dev/null | xargs || true)"
+echo "postgres_public=$(ss -ltnH '( sport = :5432 )' 2>/dev/null | awk '{print $4}' | grep -Ev '^(127\.0\.0\.1|\[::1\]|\[::ffff:127\.0\.0\.1\]):5432$' >/dev/null && echo yes || echo no)"
 echo "consul_service=$(systemctl is-active consul 2>/dev/null || true)"
 echo "consul_leader=$(curl -fsS http://127.0.0.1:8500/v1/status/leader 2>/dev/null | tr -d '"' || true)"
 echo "consul_members=$(curl -fsS http://127.0.0.1:8500/v1/status/peers 2>/dev/null | tr -d '[]" ' || true)"
@@ -145,7 +145,7 @@ func verifyLocalState(stateDir string, add func(string, string, string, string))
 func checkNode(n inventory.Node, data map[string]string, add func(string, string, string, string)) {
 	if hasRole(n, "control-plane") {
 		expect(n.Name, "control-plane-service", data["stackforge_service"] == "active", data["stackforge_service"], add)
-		expect(n.Name, "health", strings.EqualFold(data["stackforge_health"], "ok"), data["stackforge_health"], add)
+		expect(n.Name, "health", isHealthyValue(data["stackforge_health"]), data["stackforge_health"], add)
 		expect(n.Name, "api-auth", data["stackforge_api_code"] == "401", "HTTP "+data["stackforge_api_code"], add)
 		expect(n.Name, "remote-env-permissions", data["remote_env_mode"] == "600", "mode "+data["remote_env_mode"], add)
 	}
@@ -169,6 +169,15 @@ func checkNode(n inventory.Node, data map[string]string, add func(string, string
 		expect(n.Name, "traefik-ports", strings.Contains(ports, ":80") && strings.Contains(ports, ":443"), ports, add)
 	}
 	expect(n.Name, "firewall", data["firewall"] == "ufw", data["firewall"], add)
+}
+
+func isHealthyValue(v string) bool {
+	v = strings.TrimSpace(v)
+	if strings.EqualFold(v, "ok") {
+		return true
+	}
+	v = strings.ToLower(v)
+	return strings.Contains(v, `"status":"ok"`) || strings.Contains(v, `'status':'ok'`)
 }
 
 func expect(node, name string, ok bool, message string, add func(string, string, string, string)) {

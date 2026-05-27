@@ -2,12 +2,15 @@ package install
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"stackforge/internal/stackforge/config"
 	"stackforge/internal/stackforge/inventory"
+	"stackforge/internal/stackforge/remoteexec"
 )
 
 func TestDryRunWritesInventorySecretsAndReport(t *testing.T) {
@@ -41,5 +44,36 @@ func TestDryRunWritesInventorySecretsAndReport(t *testing.T) {
 	}
 	if inv.LastSuccessfulStep == "" {
 		t.Fatal("expected last successful dry-run step")
+	}
+}
+
+type fakeExecutor struct {
+	result remoteexec.Result
+	err    error
+}
+
+func (f fakeExecutor) Run(ctx context.Context, node string, cmd remoteexec.Command) (remoteexec.Result, error) {
+	return f.result, f.err
+}
+
+func TestRemoteStepApplyIncludesStderrOnFailure(t *testing.T) {
+	opts := Options{Executor: fakeExecutor{result: remoteexec.Result{Stderr: "permission denied"}, err: errors.New("EOF")}}
+	step := remoteStep(opts, "node-1", "10.0.0.11", Step{ID: "node-1:control-plane", Node: "node-1", Role: "control-plane"}, "true", "false", "true")
+	err := step.Apply(context.Background())
+	if err == nil {
+		t.Fatal("expected apply error")
+	}
+	if !strings.Contains(err.Error(), "EOF") || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("expected wrapped stderr context, got %v", err)
+	}
+}
+
+func TestInstallStackForgeBinaryCommandAvoidsInlinePayload(t *testing.T) {
+	cmd := installStackForgeBinaryCommand()
+	if strings.Contains(cmd, "base64 -d > /usr/local/bin/stackforge") {
+		t.Fatalf("expected no inline binary payload in command: %s", cmd)
+	}
+	if !strings.Contains(cmd, "command -v stackforge") {
+		t.Fatalf("expected command to rely on preinstalled stackforge binary: %s", cmd)
 	}
 }

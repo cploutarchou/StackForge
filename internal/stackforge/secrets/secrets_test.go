@@ -25,6 +25,20 @@ func TestLoadOrGenerateWrites0600(t *testing.T) {
 	}
 }
 
+func TestLoadOrGenerateDoesNotUseGeneratedByInstallAsAdminKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "generated-secrets.yaml")
+	sec, created, err := LoadOrGenerate(path, []string{"generated-by-install"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("expected created")
+	}
+	if sec.StackForgeAdminAPIKey == "generated-by-install" || sec.StackForgeAdminAPIKey == "" {
+		t.Fatalf("expected generated admin API key, got %q", sec.StackForgeAdminAPIKey)
+	}
+}
+
 func TestDeployEnvCommandRedactsEncodedPayloadAndSecrets(t *testing.T) {
 	s := &Secrets{StackForgeAdminAPIKey: "admin-secret", DatabasePassword: "db-secret", InternalServiceToken: "svc-secret"}
 	env := s.Env("postgres://stackforge:db-secret@127.0.0.1:5432/stackforge")

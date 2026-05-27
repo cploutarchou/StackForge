@@ -44,7 +44,7 @@ func LoadOrGenerate(path string, adminKeys []string, traefikDashboard bool) (*Se
 	if s.NomadBootstrapToken, err = token(32); err != nil {
 		return nil, false, err
 	}
-	if len(adminKeys) > 0 && strings.TrimSpace(adminKeys[0]) != "" && adminKeys[0] != "change-me" {
+	if len(adminKeys) > 0 && strings.TrimSpace(adminKeys[0]) != "" && adminKeys[0] != "change-me" && adminKeys[0] != "generated-by-install" {
 		s.StackForgeAdminAPIKey = adminKeys[0]
 	} else if s.StackForgeAdminAPIKey, err = token(32); err != nil {
 		return nil, false, err

@@ -51,11 +51,12 @@ func Run(ctx context.Context, stateDir string, inv *inventory.Inventory, exec re
 	}
 	verifyLocalState(stateDir, add)
 	for _, n := range inv.Nodes {
-		res, err := exec.Run(ctx, n.PrivateIP, remoteexec.Command{Command: Command(), Sudo: true, Timeout: 60 * time.Second})
-		if err != nil {
-			add(n.Name, "ssh", "fail", err.Error())
+		res, address, errText := runNodeCommand(ctx, exec, n)
+		if errText != "" {
+			add(n.Name, "ssh", "fail", errText)
 			continue
 		}
+		add(n.Name, "ssh", "ok", "verified via "+address)
 		data := parse(res.Stdout)
 		checkNode(n, data, add)
 	}
@@ -73,6 +74,40 @@ func Run(ctx context.Context, stateDir string, inv *inventory.Inventory, exec re
 	return report
 }
 
+func runNodeCommand(ctx context.Context, exec remoteexec.Executor, n inventory.Node) (remoteexec.Result, string, string) {
+	var errors []string
+	addresses := nodeAddresses(n)
+	if len(addresses) == 0 {
+		return remoteexec.Result{}, "", "node has no private or public address in inventory"
+	}
+	for _, addr := range addresses {
+		res, err := exec.Run(ctx, addr, remoteexec.Command{Command: Command(), Sudo: true, Timeout: 60 * time.Second})
+		if err == nil {
+			return res, addr, ""
+		}
+		msg := err.Error()
+		if strings.TrimSpace(res.Stderr) != "" {
+			msg += ": " + strings.TrimSpace(res.Stderr)
+		}
+		errors = append(errors, addr+" -> "+msg)
+	}
+	return remoteexec.Result{}, "", strings.Join(errors, "; ")
+}
+
+func nodeAddresses(n inventory.Node) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, addr := range []string{n.PrivateIP, n.PublicIP} {
+		addr = strings.TrimSpace(addr)
+		if addr == "" || seen[addr] {
+			continue
+		}
+		seen[addr] = true
+		out = append(out, addr)
+	}
+	return out
+}
+
 func Command() string {
 	return `set +e
 echo "stackforge_service=$(systemctl is-active stackforge-control-plane 2>/dev/null || true)"
@@ -80,8 +115,8 @@ echo "stackforge_health=$(curl -fsS http://127.0.0.1:8080/health 2>/dev/null | t
 echo "stackforge_api_code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/v1/domains 2>/dev/null || true)"
 echo "postgres_service=$(systemctl is-active postgresql 2>/dev/null || true)"
 echo "postgres_query=$(sudo -u postgres psql -d stackforge -tAc 'SELECT 1' 2>/dev/null | xargs || true)"
-echo "postgres_migrations=$(sudo -u postgres psql -d stackforge -tAc \"SELECT to_regclass('public.domains') IS NOT NULL\" 2>/dev/null | xargs || true)"
-echo "postgres_public=$(ss -ltnp 2>/dev/null | grep -E ':5432 .*0\.0\.0\.0|:5432 .*:::' >/dev/null && echo yes || echo no)"
+echo "postgres_migrations=$(sudo -u postgres psql -d stackforge -tAc 'SELECT to_regclass($$public.domains$$) IS NOT NULL' 2>/dev/null | xargs || true)"
+echo "postgres_public=$(ss -ltnH '( sport = :5432 )' 2>/dev/null | awk '{print $4}' | grep -Ev '^(127\.0\.0\.1|\[::1\]|\[::ffff:127\.0\.0\.1\]):5432$' >/dev/null && echo yes || echo no)"
 echo "consul_service=$(systemctl is-active consul 2>/dev/null || true)"
 echo "consul_leader=$(curl -fsS http://127.0.0.1:8500/v1/status/leader 2>/dev/null | tr -d '"' || true)"
 echo "consul_members=$(curl -fsS http://127.0.0.1:8500/v1/status/peers 2>/dev/null | tr -d '[]" ' || true)"
@@ -110,7 +145,7 @@ func verifyLocalState(stateDir string, add func(string, string, string, string))
 func checkNode(n inventory.Node, data map[string]string, add func(string, string, string, string)) {
 	if hasRole(n, "control-plane") {
 		expect(n.Name, "control-plane-service", data["stackforge_service"] == "active", data["stackforge_service"], add)
-		expect(n.Name, "health", strings.EqualFold(data["stackforge_health"], "ok"), data["stackforge_health"], add)
+		expect(n.Name, "health", isHealthyValue(data["stackforge_health"]), data["stackforge_health"], add)
 		expect(n.Name, "api-auth", data["stackforge_api_code"] == "401", "HTTP "+data["stackforge_api_code"], add)
 		expect(n.Name, "remote-env-permissions", data["remote_env_mode"] == "600", "mode "+data["remote_env_mode"], add)
 	}
@@ -134,6 +169,15 @@ func checkNode(n inventory.Node, data map[string]string, add func(string, string
 		expect(n.Name, "traefik-ports", strings.Contains(ports, ":80") && strings.Contains(ports, ":443"), ports, add)
 	}
 	expect(n.Name, "firewall", data["firewall"] == "ufw", data["firewall"], add)
+}
+
+func isHealthyValue(v string) bool {
+	v = strings.TrimSpace(v)
+	if strings.EqualFold(v, "ok") {
+		return true
+	}
+	v = strings.ToLower(v)
+	return strings.Contains(v, `"status":"ok"`) || strings.Contains(v, `'status':'ok'`)
 }
 
 func expect(node, name string, ok bool, message string, add func(string, string, string, string)) {

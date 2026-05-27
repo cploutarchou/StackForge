@@ -57,12 +57,48 @@ func (NetResolver) LookupCNAME(ctx context.Context, host string) (string, error)
 	return net.DefaultResolver.LookupCNAME(ctx, host)
 }
 
+type DNSResolver struct {
+	Address string
+}
+
+func (r DNSResolver) LookupHost(ctx context.Context, host string) ([]string, error) {
+	return r.resolver().LookupHost(ctx, host)
+}
+
+func (r DNSResolver) LookupCNAME(ctx context.Context, host string) (string, error) {
+	return r.resolver().LookupCNAME(ctx, host)
+}
+
+func (r DNSResolver) resolver() *net.Resolver {
+	addr := normalizeResolverAddress(r.Address)
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	return &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+		return dialer.DialContext(ctx, "udp", addr)
+	}}
+}
+
 type ApplyOptions struct {
-	Path      string
-	AuditPath string
-	Client    *cloudflare.Client
-	DryRun    bool
-	TokenEnv  string
+	Path       string
+	AuditPath  string
+	Client     *cloudflare.Client
+	DryRun     bool
+	TokenEnv   string
+	MaxRetries int
+	RetryDelay time.Duration
+}
+
+type ApplyAllResult struct {
+	Applied []Entry  `json:"applied"`
+	Failed  []Entry  `json:"failed"`
+	Errors  []string `json:"errors,omitempty"`
+	DryRun  bool     `json:"dry_run"`
+}
+
+type VerifyOptions struct {
+	Path          string
+	Domain        string
+	Resolvers     []Resolver
+	ResolverNames []string
 }
 
 func Load(path string) (*Store, error) {
@@ -228,25 +264,25 @@ func ApplyDNS(ctx context.Context, domain string, opts ApplyOptions) (Entry, err
 		client = &cloudflare.Client{Token: token}
 	}
 	if e.ZoneID == "" {
-		zone, err := client.LookupZone(ctx, e.RootDomain)
+		zone, err := lookupZoneWithRetry(ctx, client, e.RootDomain, opts)
 		if err != nil {
-			e.LastError = err.Error()
+			e.LastError = cloudflareFailureMessage(err)
 			s.Entries[idx] = e
 			_ = Save(opts.Path, s)
 			audit(opts.AuditPath, "domain_pool.apply_dns", e.ID, before, e, err.Error())
-			return e, err
+			return e, withCloudflareHint(err)
 		}
 		e.ZoneID = zone
 	}
 	rec := cloudflare.Record{Type: e.RecordType, Name: e.Domain, Content: e.TargetValue, Proxied: e.Proxied}
-	if err := client.UpsertRecord(ctx, e.ZoneID, rec); err != nil {
+	if err := upsertRecordWithRetry(ctx, client, e.ZoneID, rec, opts); err != nil {
 		e.DNSStatus = "failed"
 		e.Status = "failed"
-		e.LastError = err.Error()
+		e.LastError = cloudflareFailureMessage(err)
 		s.Entries[idx] = e
 		_ = Save(opts.Path, s)
 		audit(opts.AuditPath, "domain_pool.apply_dns", e.ID, before, e, err.Error())
-		return e, err
+		return e, withCloudflareHint(err)
 	}
 	if records, err := client.ListRecords(ctx, e.ZoneID, e.Domain); err == nil {
 		for _, r := range records {
@@ -268,22 +304,84 @@ func ApplyDNS(ctx context.Context, domain string, opts ApplyOptions) (Entry, err
 	return e, nil
 }
 
-func VerifyDNS(ctx context.Context, path, domain string, resolver Resolver) (Entry, error) {
-	if resolver == nil {
-		resolver = NetResolver{}
+func ApplyAll(ctx context.Context, opts ApplyOptions) (ApplyAllResult, error) {
+	s, err := Load(opts.Path)
+	if err != nil {
+		return ApplyAllResult{}, err
 	}
-	e, idx, s, err := Find(path, domain)
+	result := ApplyAllResult{DryRun: opts.DryRun}
+	for _, e := range s.Entries {
+		if e.Status == "disabled" {
+			continue
+		}
+		updated, err := ApplyDNS(ctx, e.Domain, opts)
+		if err != nil {
+			result.Failed = append(result.Failed, updated)
+			result.Errors = append(result.Errors, e.Domain+": "+err.Error())
+			continue
+		}
+		result.Applied = append(result.Applied, updated)
+	}
+	if len(result.Errors) > 0 {
+		return result, fmt.Errorf("failed to apply DNS for %d domain(s)", len(result.Errors))
+	}
+	return result, nil
+}
+
+func VerifyDNS(ctx context.Context, path, domain string, resolver Resolver) (Entry, error) {
+	return VerifyDNSWithOptions(ctx, VerifyOptions{Path: path, Domain: domain, Resolvers: []Resolver{resolver}})
+}
+
+func VerifyDNSWithOptions(ctx context.Context, opts VerifyOptions) (Entry, error) {
+	resolvers := opts.Resolvers
+	if len(resolvers) == 0 || resolvers[0] == nil {
+		resolvers = []Resolver{NetResolver{}}
+	}
+	e, idx, s, err := Find(opts.Path, opts.Domain)
 	if err != nil {
 		return Entry{}, err
 	}
 	before := e
+	var failures []string
+	for i, resolver := range resolvers {
+		if resolver == nil {
+			resolver = NetResolver{}
+		}
+		if err := verifyEntryDNS(ctx, e, resolver); err != nil {
+			failures = append(failures, resolverName(opts.ResolverNames, i)+": "+err.Error())
+		}
+	}
 	var verifyErr error
+	if len(failures) > 0 {
+		verifyErr = errors.New(strings.Join(failures, "; "))
+	}
+	e.UpdatedAt = time.Now().UTC()
+	if verifyErr != nil {
+		e.DNSStatus = "failed"
+		e.VerificationStatus = "failed"
+		e.LastError = verifyErr.Error()
+		s.Entries[idx] = e
+		_ = Save(opts.Path, s)
+		audit(filepath.Join(filepath.Dir(opts.Path), "domain-pool-audit.jsonl"), "domain_pool.verify_dns", e.ID, before, e, verifyErr.Error())
+		return e, verifyErr
+	}
+	e.DNSStatus = "verified"
+	e.VerificationStatus = "verified"
+	e.LastError = ""
+	s.Entries[idx] = e
+	if err := Save(opts.Path, s); err != nil {
+		return Entry{}, err
+	}
+	audit(filepath.Join(filepath.Dir(opts.Path), "domain-pool-audit.jsonl"), "domain_pool.verify_dns", e.ID, before, e, "")
+	return e, nil
+}
+
+func verifyEntryDNS(ctx context.Context, e Entry, resolver Resolver) error {
 	switch e.RecordType {
 	case "A":
 		hosts, err := resolver.LookupHost(ctx, e.Domain)
 		if err != nil {
-			verifyErr = err
-			break
+			return err
 		}
 		want := net.ParseIP(e.TargetValue)
 		found := false
@@ -293,39 +391,134 @@ func VerifyDNS(ctx context.Context, path, domain string, resolver Resolver) (Ent
 			}
 		}
 		if !found {
-			verifyErr = fmt.Errorf("A record for %s has %v, want %s", e.Domain, hosts, e.TargetValue)
+			return fmt.Errorf("A record for %s has %v, want %s", e.Domain, hosts, e.TargetValue)
 		}
 	case "CNAME":
 		got, err := resolver.LookupCNAME(ctx, e.Domain)
 		if err != nil {
-			verifyErr = err
-			break
+			return err
 		}
 		if trimDot(got) != trimDot(e.TargetValue) {
-			verifyErr = fmt.Errorf("CNAME for %s is %s, want %s", e.Domain, got, e.TargetValue)
+			return fmt.Errorf("CNAME for %s is %s, want %s", e.Domain, got, e.TargetValue)
 		}
 	default:
-		verifyErr = fmt.Errorf("unsupported record type %s", e.RecordType)
+		return fmt.Errorf("unsupported record type %s", e.RecordType)
 	}
-	e.UpdatedAt = time.Now().UTC()
-	if verifyErr != nil {
-		e.DNSStatus = "failed"
-		e.VerificationStatus = "failed"
-		e.LastError = verifyErr.Error()
-		s.Entries[idx] = e
-		_ = Save(path, s)
-		audit(filepath.Join(filepath.Dir(path), "domain-pool-audit.jsonl"), "domain_pool.verify_dns", e.ID, before, e, verifyErr.Error())
-		return e, verifyErr
+	return nil
+}
+
+func lookupZoneWithRetry(ctx context.Context, client *cloudflare.Client, name string, opts ApplyOptions) (string, error) {
+	var last error
+	for attempt := 0; attempt <= retryCount(opts); attempt++ {
+		zone, err := client.LookupZone(ctx, name)
+		if err == nil {
+			return zone, nil
+		}
+		last = err
+		if !shouldRetryCloudflare(err) || attempt == retryCount(opts) {
+			break
+		}
+		sleep(ctx, retryDelay(opts, attempt))
 	}
-	e.DNSStatus = "verified"
-	e.VerificationStatus = "verified"
-	e.LastError = ""
-	s.Entries[idx] = e
-	if err := Save(path, s); err != nil {
-		return Entry{}, err
+	return "", last
+}
+
+func upsertRecordWithRetry(ctx context.Context, client *cloudflare.Client, zoneID string, rec cloudflare.Record, opts ApplyOptions) error {
+	var last error
+	for attempt := 0; attempt <= retryCount(opts); attempt++ {
+		err := client.UpsertRecord(ctx, zoneID, rec)
+		if err == nil {
+			return nil
+		}
+		last = err
+		if !shouldRetryCloudflare(err) || attempt == retryCount(opts) {
+			break
+		}
+		sleep(ctx, retryDelay(opts, attempt))
 	}
-	audit(filepath.Join(filepath.Dir(path), "domain-pool-audit.jsonl"), "domain_pool.verify_dns", e.ID, before, e, "")
-	return e, nil
+	return last
+}
+
+func retryCount(opts ApplyOptions) int {
+	if opts.MaxRetries > 0 {
+		return opts.MaxRetries
+	}
+	return 2
+}
+
+func retryDelay(opts ApplyOptions, attempt int) time.Duration {
+	delay := opts.RetryDelay
+	if delay <= 0 {
+		delay = time.Second
+	}
+	return delay * time.Duration(1<<attempt)
+}
+
+func sleep(ctx context.Context, d time.Duration) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
+
+func shouldRetryCloudflare(err error) bool {
+	var apiErr cloudflare.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == 429
+}
+
+func cloudflareFailureMessage(err error) string {
+	hint := cloudflareHint(err)
+	if hint == "" {
+		return err.Error()
+	}
+	return err.Error() + ". " + hint
+}
+
+func withCloudflareHint(err error) error {
+	if hint := cloudflareHint(err); hint != "" {
+		return fmt.Errorf("%w. %s", err, hint)
+	}
+	return err
+}
+
+func cloudflareHint(err error) string {
+	var apiErr cloudflare.APIError
+	if !errors.As(err, &apiErr) {
+		return ""
+	}
+	switch apiErr.StatusCode {
+	case 403:
+		return "Check Cloudflare token permissions, zone scope, and token IP restrictions; run from an allowed egress IP or update the token policy."
+	case 429:
+		return "Cloudflare rate limited the request. Wait for the limit to clear, reduce repeated failed auth attempts, and retry with the same command."
+	default:
+		return ""
+	}
+}
+
+func resolverName(names []string, i int) string {
+	if i >= 0 && i < len(names) && strings.TrimSpace(names[i]) != "" {
+		return strings.TrimSpace(names[i])
+	}
+	return fmt.Sprintf("resolver-%d", i+1)
+}
+
+func normalizeResolverAddress(address string) string {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		address = "1.1.1.1"
+	}
+	if strings.Contains(address, ":") {
+		if _, _, err := net.SplitHostPort(address); err == nil {
+			return address
+		}
+		if ip := net.ParseIP(address); ip != nil && ip.To4() == nil {
+			return net.JoinHostPort(address, "53")
+		}
+	}
+	return net.JoinHostPort(address, "53")
 }
 
 func audit(path, action, resourceID string, before, after Entry, errText string) {

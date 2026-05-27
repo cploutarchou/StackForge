@@ -325,6 +325,11 @@ func Plan(opts Options) ([]Step, []string, error) {
 				}
 			case "database":
 				if !componentSeen[cfg.Database.Engine] {
+					if cfg.Database.Engine == "sqlite" {
+						warnings = append(warnings, fmt.Sprintf("node %s has database role but database.engine=sqlite; skipping PostgreSQL install", node.Name))
+						componentSeen[cfg.Database.Engine] = true
+						continue
+					}
 					if cfg.Database.Engine != "postgres" {
 						return nil, nil, fmt.Errorf("live install supports PostgreSQL only; database.engine=%s is not implemented", cfg.Database.Engine)
 					}
@@ -403,13 +408,24 @@ func postgresStep(opts Options, node, addr string) Step {
 
 func controlPlaneStep(opts Options, node, addr string) Step {
 	env := ""
+	requiresPostgres := true
+	databaseURL := ""
 	secretValues := []string{}
 	if opts.SecretSet != nil {
-		env = opts.SecretSet.Env("postgres://stackforge:" + opts.SecretSet.DatabasePassword + "@127.0.0.1:5432/stackforge?sslmode=disable")
+		databaseURL = "postgres://stackforge:" + opts.SecretSet.DatabasePassword + "@127.0.0.1:5432/stackforge?sslmode=disable"
+		if strings.EqualFold(strings.TrimSpace(opts.Config.Database.Engine), "sqlite") {
+			databaseURL = "sqlite:///var/lib/stackforge/stackforge-controlplane.db"
+			requiresPostgres = false
+		}
+		env = opts.SecretSet.Env(databaseURL)
 		secretValues = opts.SecretSet.Values()
 	}
 	checkCommand := "systemctl list-unit-files stackforge-control-plane.service | grep -q stackforge-control-plane && systemctl is-active --quiet stackforge-control-plane"
-	applyCommand := installControlPlaneCommand(env)
+	if databaseURL != "" {
+		expectedDatabaseLine := "DATABASE_URL=" + shellQuote(databaseURL)
+		checkCommand += " && grep -Fq " + shellQuote(expectedDatabaseLine) + " /etc/stackforge/stackforge.env"
+	}
+	applyCommand := installControlPlaneCommand(env, requiresPostgres)
 	verifyCommand := "systemctl is-active --quiet stackforge-control-plane && curl -fsS http://127.0.0.1:" + fmt.Sprint(opts.Config.ControlPlane.APIPort) + "/health >/dev/null && test \"$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:" + fmt.Sprint(opts.Config.ControlPlane.APIPort) + "/api/v1/domains)\" = '401'"
 	return remoteStep(opts, node, addr, Step{ID: node + ":stackforge-control-plane", Name: "Install StackForge control plane systemd service", Node: node, Role: "control-plane", DryRunDescription: "deploy /etc/stackforge/stackforge.env, install stackforge-control-plane.service, start service, verify /health and authenticated /api/v1", IdempotencyKey: node + "/stackforge-control-plane", Rollback: "Disable stackforge-control-plane.service and restore /etc/stackforge backups.", FailureRecovery: "Inspect journalctl -u stackforge-control-plane and /etc/stackforge/stackforge.env permissions.", ChangedFiles: []string{"/usr/local/bin/stackforge", "/etc/stackforge/stackforge.env", "/etc/systemd/system/stackforge-control-plane.service"}, BackupFiles: []string{"/etc/stackforge.stackforge.<timestamp>.tgz", "/usr/local/bin/stackforge.stackforge.<timestamp>.bak"}}, checkCommand, applyCommand, verifyCommand, secretValues...)
 }
@@ -459,7 +475,13 @@ func remoteStep(opts Options, node, addr string, step Step, checkCommand, applyC
 				_ = secrets.Save(opts.SecretPath, opts.SecretSet)
 			}
 		}
-		return err
+		if err != nil {
+			if stderr := strings.TrimSpace(res.Stderr); stderr != "" {
+				return fmt.Errorf("%w: %s", err, stderr)
+			}
+			return err
+		}
+		return nil
 	}
 	step.Verify = func(ctx context.Context) error {
 		if opts.Executor == nil {
@@ -629,14 +651,18 @@ INSERT INTO stackforge_schema_migrations(version) VALUES ('001_stackforge_contro
 		"printf %s " + shellQuote(base64.StdEncoding.EncodeToString([]byte(migration))) + " | base64 -d | sudo -u postgres psql -d stackforge"
 }
 
-func installControlPlaneCommand(env string) string {
+func installControlPlaneCommand(env string, requiresPostgres bool) string {
 	envCmd := "install -d -m 0750 /etc/stackforge /var/lib/stackforge && touch /etc/stackforge/stackforge.env && chmod 0600 /etc/stackforge/stackforge.env"
 	if env != "" {
 		envCmd = secrets.DeployEnvCommand(env, nil).Command
 	}
+	after := "network-online.target"
+	if requiresPostgres {
+		after = "network-online.target postgresql.service"
+	}
 	unit := `[Unit]
 Description=StackForge control plane
-After=network-online.target postgresql.service
+After=` + after + `
 
 [Service]
 EnvironmentFile=/etc/stackforge/stackforge.env
@@ -663,13 +689,9 @@ func installTraefikBinaryCommand(version string) string {
 }
 
 func installStackForgeBinaryCommand() string {
-	exe, err := os.Executable()
-	if err == nil && filepath.Base(exe) == "stackforge" {
-		if b, readErr := os.ReadFile(exe); readErr == nil {
-			encoded := base64.StdEncoding.EncodeToString(b)
-			return "if [ -x /usr/local/bin/stackforge ]; then cp /usr/local/bin/stackforge /usr/local/bin/stackforge.stackforge.$(date -u +%Y%m%dT%H%M%SZ).bak; fi && printf %s " + shellQuote(encoded) + " | base64 -d > /usr/local/bin/stackforge && chmod 0755 /usr/local/bin/stackforge"
-		}
-	}
+	// Avoid embedding full binaries in a single SSH exec command payload because
+	// large inline base64 blobs can trigger opaque transport errors (e.g. EOF).
+	// Require a preinstalled binary on the target (or in PATH) and copy it locally.
 	return "command -v stackforge >/dev/null 2>&1 && install -m 0755 $(command -v stackforge) /usr/local/bin/stackforge || test -x /usr/local/bin/stackforge || { echo 'run install from a built stackforge binary or preinstall /usr/local/bin/stackforge on the target' >&2; exit 1; }"
 }
 
@@ -682,7 +704,8 @@ func backupDirCommand(dir string) string {
 }
 
 func writeBase64Command(path, body, mode string) string {
-	return "printf %s " + shellQuote(base64.StdEncoding.EncodeToString([]byte(body))) + " | base64 -d > " + shellQuote(path) + " && chmod " + shellQuote(mode) + " " + shellQuote(path)
+	dir := filepath.Dir(path)
+	return "tmp=$(mktemp " + shellQuote(filepath.Join(dir, ".stackforge.tmp.XXXXXX")) + ") && printf %s " + shellQuote(base64.StdEncoding.EncodeToString([]byte(body))) + " | base64 -d > \"$tmp\" && chmod " + shellQuote(mode) + " \"$tmp\" && mv \"$tmp\" " + shellQuote(path)
 }
 
 func firewallDryRun(plan firewall.Plan) string {

@@ -346,9 +346,9 @@ func Plan(opts Options) ([]Step, []string, error) {
 }
 
 func initialInventory(cfg *config.Config) *inventory.Inventory {
-	inv := &inventory.Inventory{ClusterName: cfg.Cluster.Name, Environment: cfg.Cluster.Environment, Datacenter: cfg.Cluster.Datacenter, InstallStatus: "installing", FirewallMode: "ufw", ComponentVersions: map[string]string{}, ServiceStatus: map[string]string{}}
+	inv := &inventory.Inventory{ClusterName: cfg.Cluster.Name, Environment: cfg.Cluster.Environment, Datacenter: cfg.Cluster.Datacenter, InstallStatus: "installing", LastHealthCheckStatus: "pending", FirewallMode: "ufw", ComponentVersions: map[string]string{}, ServiceStatus: map[string]string{}}
 	for _, n := range cfg.Nodes {
-		inv.Nodes = append(inv.Nodes, inventory.Node{Name: n.Name, Roles: n.Roles, PrivateIP: n.Address, PublicIP: n.PublicAddress, SSH: inventory.SSHInfo{User: cfg.SSH.User, Port: cfg.SSH.Port, PrivateKeyPath: cfg.SSH.PrivateKeyPath}, Components: map[string]string{}, Services: map[string]string{}})
+		inv.Nodes = append(inv.Nodes, inventory.Node{Name: n.Name, Roles: n.Roles, PrivateIP: n.Address, PublicIP: n.PublicAddress, SSH: inventory.SSHInfo{User: cfg.SSH.User, Port: cfg.SSH.Port, PrivateKeyPath: cfg.SSH.PrivateKeyPath}, Components: map[string]string{}, Services: map[string]string{}, HealthStatus: "pending-install"})
 		for _, role := range n.Roles {
 			switch role {
 			case "consul-server":

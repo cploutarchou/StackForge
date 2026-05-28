@@ -100,7 +100,9 @@ func RunWithOptions(opts Options) (*Manifest, error) {
 	if err := WriteManifest(dir, m); err != nil {
 		return nil, err
 	}
-	updateInventoryBackup(stateDir, m)
+	if !opts.DryRun && opts.Executor != nil {
+		updateInventoryBackup(stateDir, m)
+	}
 	return m, nil
 }
 

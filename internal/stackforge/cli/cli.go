@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -70,7 +71,7 @@ func newRoot() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&rootOpts.allowPublicSSH, "allow-public-ssh", false, "allow allowed_ssh_cidrs to include 0.0.0.0/0")
 	cmd.PersistentFlags().BoolVar(&rootOpts.confirmProduction, "confirm-production", false, "allow live actions against production environment after validation")
 	_ = viper.BindPFlags(cmd.PersistentFlags())
-	cmd.AddCommand(versionCmd(), installCmd(), statusCmd(), inventoryCmd(), nodesCmd(), componentsCmd(), firewallCmd(), domainsCmd(), consulCmd(), nomadCmd(), traefikCmd(), dbCmd(), backupCmd(), rollbackCmd(), validateCmd(), verifyCmd(), contextCmd(), upgradeCmd(), uninstallCmd(), serveCmd())
+	cmd.AddCommand(versionCmd(), installCmd(), statusCmd(), inventoryCmd(), nodesCmd(), componentsCmd(), firewallCmd(), domainsCmd(), deployCmd(), consulCmd(), nomadCmd(), traefikCmd(), dbCmd(), backupCmd(), rollbackCmd(), validateCmd(), verifyCmd(), contextCmd(), upgradeCmd(), uninstallCmd(), serveCmd())
 	return cmd
 }
 
@@ -172,9 +173,12 @@ func installCmd() *cobra.Command {
 
 func statusCmd() *cobra.Command {
 	return &cobra.Command{Use: "status", Short: "Show StackForge cluster status", RunE: func(cmd *cobra.Command, args []string) error {
+		if note := statusClusterNotice(); note != "" {
+			fmt.Print(note)
+		}
 		inv, err := loadInventory()
 		if err != nil {
-			return err
+			return statusInventoryError(err)
 		}
 		if exec := executorFromConfig(); exec != nil && !rootOpts.dryRun {
 			inventory.Refresh(context.Background(), inv, exec)
@@ -184,6 +188,16 @@ func statusCmd() *cobra.Command {
 		_ = inventory.Save(filepath.Join(stateFromCluster(), "inventory.yaml"), inv)
 		return output(status.FromInventory(inv))
 	}}
+}
+
+func statusClusterNotice() string {
+	if rootOpts.output == "json" {
+		return ""
+	}
+	if strings.TrimSpace(rootOpts.cluster) != "" {
+		return ""
+	}
+	return fmt.Sprintf("[INFO] using cluster: %s (auto-detected)\n", clusterName())
 }
 
 func inventoryCmd() *cobra.Command {
@@ -564,7 +578,79 @@ func clusterName() string {
 			return cfg.Cluster.Name
 		}
 	}
+	if discovered := discoverLocalClusterName(rootOpts.stateDir); discovered != "" {
+		return discovered
+	}
 	return "stackforge-production"
+}
+
+func statusInventoryError(err error) error {
+	if !os.IsNotExist(err) {
+		return err
+	}
+	base := config.StateDir(rootOpts.stateDir, "")
+	clusters := discoverLocalClusters(base)
+	path := filepath.Join(stateFromCluster(), "inventory.yaml")
+	if len(clusters) == 0 {
+		return fmt.Errorf("no local inventory found at %s; run context sync first or pass --cluster/--config", path)
+	}
+	return fmt.Errorf("inventory missing for cluster %q at %s; available local clusters: %s (use --cluster)", clusterName(), path, strings.Join(clusters, ", "))
+}
+
+func discoverLocalClusterName(stateDir string) string {
+	base := config.StateDir(stateDir, "")
+	if hasClusterInventory(base, "stackforge-production") {
+		return "stackforge-production"
+	}
+	candidates := discoverLocalClusters(base)
+	if len(candidates) == 0 {
+		return ""
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	if hasValue(candidates, "stackforge-cluster") {
+		return "stackforge-cluster"
+	}
+	sort.Strings(candidates)
+	return candidates[0]
+}
+
+func discoverLocalClusters(base string) []string {
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil
+	}
+	candidates := []string{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if hasClusterInventory(base, name) {
+			candidates = append(candidates, name)
+		}
+	}
+	sort.Strings(candidates)
+	return candidates
+}
+
+func hasClusterInventory(base, cluster string) bool {
+	if strings.TrimSpace(cluster) == "" {
+		return false
+	}
+	path := filepath.Join(base, cluster, "inventory.yaml")
+	stat, err := os.Stat(path)
+	return err == nil && !stat.IsDir()
+}
+
+func hasValue(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func executorFromConfig() *sfssh.Executor {

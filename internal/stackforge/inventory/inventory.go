@@ -3,6 +3,7 @@ package inventory
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -91,12 +92,22 @@ func Normalize(inv *Inventory) {
 	if inv == nil {
 		return
 	}
+	if strings.TrimSpace(inv.InstallStatus) == "" {
+		inv.InstallStatus = "pending"
+	}
+	if strings.TrimSpace(inv.LastHealthCheckStatus) == "" {
+		inv.LastHealthCheckStatus = "pending"
+	}
+	if strings.TrimSpace(inv.FirewallMode) == "" {
+		inv.FirewallMode = "ufw"
+	}
 	if inv.ComponentVersions == nil {
 		inv.ComponentVersions = map[string]string{}
 	}
 	if inv.ServiceStatus == nil {
 		inv.ServiceStatus = map[string]string{}
 	}
+	inv.Warnings = dedupeWarnings(inv.Warnings)
 	for i := range inv.Nodes {
 		if inv.Nodes[i].Components == nil {
 			inv.Nodes[i].Components = map[string]string{}
@@ -110,6 +121,10 @@ func Normalize(inv *Inventory) {
 		if inv.Nodes[i].Versions == nil {
 			inv.Nodes[i].Versions = map[string]string{}
 		}
+		if strings.TrimSpace(inv.Nodes[i].HealthStatus) == "" {
+			inv.Nodes[i].HealthStatus = "pending"
+		}
+		inv.Nodes[i].Warnings = dedupeWarnings(inv.Nodes[i].Warnings)
 	}
 }
 
@@ -124,26 +139,74 @@ func MarkStepFailure(inv *Inventory, stepID string, warning string) {
 	Normalize(inv)
 	inv.FailedInstallStep = stepID
 	inv.InstallStatus = "failed"
-	if warning != "" {
-		inv.Warnings = append(inv.Warnings, warning)
-	}
+	inv.Warnings = appendWarning(inv.Warnings, warning)
 }
 
 func MarkBackup(inv *Inventory, backupID string, warnings []string) {
 	Normalize(inv)
 	inv.LastBackupID = backupID
-	inv.Warnings = append(inv.Warnings, warnings...)
+	inv.Warnings = appendWarnings(inv.Warnings, warnings)
 }
 
 func MarkRestore(inv *Inventory, restoreID string, warnings []string) {
 	Normalize(inv)
 	inv.LastRestoreID = restoreID
-	inv.Warnings = append(inv.Warnings, warnings...)
+	inv.Warnings = appendWarnings(inv.Warnings, warnings)
 }
 
 func MarkHealthCheck(inv *Inventory, status string, warnings []string) {
 	Normalize(inv)
 	inv.LastHealthCheckStatus = status
 	inv.LastHealthCheckAt = time.Now().UTC()
-	inv.Warnings = append(inv.Warnings, warnings...)
+	inv.Warnings = appendWarnings(inv.Warnings, warnings)
+}
+
+func appendWarnings(dst []string, warnings []string) []string {
+	for _, w := range warnings {
+		dst = appendWarning(dst, w)
+	}
+	return dst
+}
+
+func appendWarning(dst []string, warning string) []string {
+	warning = strings.TrimSpace(warning)
+	if warning == "" {
+		return dst
+	}
+	if !isPersistentWarning(warning) {
+		return dst
+	}
+	for _, existing := range dst {
+		if existing == warning {
+			return dst
+		}
+	}
+	return append(dst, warning)
+}
+
+func isPersistentWarning(warning string) bool {
+	if warning == "EOF" {
+		return false
+	}
+	if strings.HasSuffix(warning, "backup not executed; dry-run or no live executor configured") {
+		return false
+	}
+	if strings.Contains(warning, "no live executor configured") {
+		return false
+	}
+	return true
+}
+
+func dedupeWarnings(in []string) []string {
+	if len(in) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(in))
+	for _, w := range in {
+		out = appendWarning(out, w)
+	}
+	if len(out) == 0 {
+		return []string{}
+	}
+	return out
 }

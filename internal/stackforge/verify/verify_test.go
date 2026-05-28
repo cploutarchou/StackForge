@@ -90,8 +90,24 @@ func TestRunFallsBackToPublicAddress(t *testing.T) {
 	if !report.Safe {
 		t.Fatalf("expected public fallback to pass: %+v", report.Errors)
 	}
-	if len(exec.seen) < 2 || exec.seen[0] != "10.20.0.11" || exec.seen[1] != "93.184.216.34" {
-		t.Fatalf("expected private then public attempt, got %+v", exec.seen)
+	if len(exec.seen) != 1 || exec.seen[0] != "93.184.216.34" {
+		t.Fatalf("expected public-first attempt for RFC1918 private IP, got %+v", exec.seen)
+	}
+}
+
+func TestNodeAddressesPrefersPublicForRFC1918Private(t *testing.T) {
+	n := inventory.Node{PrivateIP: "10.20.0.11", PublicIP: "93.184.216.34"}
+	got := nodeAddresses(n)
+	if len(got) != 2 || got[0] != "93.184.216.34" || got[1] != "10.20.0.11" {
+		t.Fatalf("unexpected address order: %+v", got)
+	}
+}
+
+func TestNodeAddressesKeepsPrivateFirstForPublicRoutablePrivateField(t *testing.T) {
+	n := inventory.Node{PrivateIP: "203.0.113.20", PublicIP: "93.184.216.34"}
+	got := nodeAddresses(n)
+	if len(got) != 2 || got[0] != "203.0.113.20" || got[1] != "93.184.216.34" {
+		t.Fatalf("unexpected address order: %+v", got)
 	}
 }
 

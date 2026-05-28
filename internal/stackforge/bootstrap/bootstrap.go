@@ -78,7 +78,7 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 	report := &Report{Cluster: opts.ClusterName, DryRun: opts.DryRun, StartedAt: time.Now().UTC()}
 	inv, _ := inventory.Load(filepath.Join(opts.StateDir, "inventory.yaml"))
 	if inv == nil {
-		inv = &inventory.Inventory{ClusterName: opts.ClusterName, Environment: opts.Environment, InstallStatus: "bootstrapping", ComponentVersions: map[string]string{}, ServiceStatus: map[string]string{}}
+		inv = &inventory.Inventory{ClusterName: opts.ClusterName, Environment: opts.Environment, InstallStatus: "bootstrapping", LastHealthCheckStatus: "pending", FirewallMode: "ufw", ComponentVersions: map[string]string{}, ServiceStatus: map[string]string{}}
 	}
 	for _, node := range opts.Nodes {
 		normalizeNode(&node)

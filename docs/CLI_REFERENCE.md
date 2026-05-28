@@ -422,6 +422,118 @@ Safety and behavior:
 - `disable` deletes routing through the API endpoint.
 - `delete` soft-deletes the domain record.
 
+## `stackforge deploy`
+
+Deploys a compose-style StackForge manifest to a selected cluster node over SSH using Docker Compose.
+
+Flags:
+
+- `--file`: path to deployment YAML manifest (required).
+- `--env-file`: env file used for deploy. Default: `.env.stackforge`.
+- `--node`: optional node name override. Default target order is `control-plane`, then `nomad-server`, then first inventory node.
+- `--auto-dns`: auto-apply Cloudflare DNS after deploy when token and domains are present. Default: `true`.
+- `--app-domain`: app domain override for auto DNS (fallbacks: `APP_DOMAIN`, `VITE_CLIENT_HOST`).
+- `--api-domain`: API domain override for auto DNS (fallbacks: `API_DOMAIN`, `VITE_API_URL`, `VITE_API_BASE_URL`, `VITE_AUTH_BASE_URL`).
+- `--dns-zone-id`: optional Cloudflare zone id override.
+- `--dns-proxied`: enable Cloudflare proxy for auto-created records.
+- `--no-build`: skip image build and run `docker compose up -d` without `--build`.
+
+Examples:
+
+```bash
+stackforge deploy \
+  --config stackforge.yaml \
+  --file /home/chris/workspace/dydx-trading-bot/stackforge-deployment.yaml \
+  --env-file /home/chris/workspace/dydx-trading-bot/.env.stackforge
+
+stackforge deploy \
+  --config stackforge.yaml \
+  --file ./stackforge-deployment.yaml \
+  --node nomad-cp-01 \
+  --no-build
+```
+
+Expected behavior:
+
+- Validates that the manifest includes a non-empty `services` map.
+- Selects a deployment node from inventory/config.
+- Copies manifest (and optional env file) to `/opt/stackforge/deployments/<manifest-name>/` on the target.
+- Uses `--env-file` (default `.env.stackforge`) and passes it explicitly to Docker Compose (`--env-file`), avoiding implicit `.env` fallback.
+- Runs `docker compose up -d [--build]` remotely via SSH.
+- If private registry credentials are set in `.env.stackforge`, logs into registries on the target before compose pull/build:
+  - GHCR via `GHCR_USERNAME` + `GHCR_TOKEN` (or `GITHUB_API_TOKEN` fallback)
+  - Docker Hub via `DOCKERHUB_USERNAME` + `DOCKERHUB_TOKEN`
+  - Custom registry via `DOCKER_REGISTRY`, `DOCKER_REGISTRY_USERNAME`, `DOCKER_REGISTRY_PASSWORD`
+- If `CLOUDFLARE_API_TOKEN` is set and domains are available, automatically manages A records through Cloudflare and stores domain entries in the local domain pool.
+
+Manifest-level DNS configuration (`stackforge-deployment.yaml`):
+
+```yaml
+name: dydx-trading-bot
+services:
+  # ...
+
+auto_dns:
+  enabled: true
+  app_domain: app.example.com
+  api_domain: api.example.com
+  domains:
+    - admin.example.com
+  zone_id: your-cloudflare-zone-id
+  proxied: true
+```
+
+Precedence order:
+
+- CLI flags override manifest values.
+- Manifest `auto_dns` values override env-file fallbacks.
+- Env-file fallbacks are used when neither flags nor manifest provide domains/zone.
+
+Safety notes:
+
+- Requires typed confirmation unless `--yes`.
+- `--dry-run` prints deployment plan only.
+- The target node must have Docker Compose installed.
+- Auto DNS requires a public target IP and valid Cloudflare API token permissions.
+- Private registry login requires valid credentials for the target registry; token values are handled as secrets and not printed verbatim.
+- Current implementation deploys to one selected host (not native multi-node Nomad job scheduling yet).
+
+### `stackforge deploy init`
+
+Generates an editable deploy scaffold: `stackforge-deployment.yaml` plus `.env.stackforge` with required credential placeholders.
+
+Flags:
+
+- `--output`, `-o`: output path for the generated YAML. Default: `stackforge-deployment.yaml`.
+- `--force`: overwrite existing file.
+- `--random-secrets`: generate secure random values in `.env.stackforge` for app secrets and DB password.
+- `--print-secrets-summary`: print masked secret previews (for verification without exposing full values).
+- `--quiet`: print only generated file paths (one per line) for scripting/CI.
+
+Example:
+
+```bash
+stackforge deploy init
+
+stackforge deploy init --output ./deploy/stackforge-deployment.yaml --force
+
+stackforge deploy init --random-secrets
+
+stackforge deploy init --random-secrets --print-secrets-summary
+
+stackforge deploy init --random-secrets --quiet
+```
+
+Expected behavior:
+
+- Writes a complete template including `auto_dns` (`enabled`, explicit domains, `proxied`) and starter `services`.
+- Writes `.env.stackforge` in the same directory for deploy-time credentials and app/domain values.
+- With `--random-secrets`, writes cryptographically random secret values instead of placeholders.
+- With `--print-secrets-summary`, returns masked values (for example `abcd...wxyz`) for key generated fields.
+- With `--quiet`, outputs only the deployment YAML path and `.env.stackforge` path.
+- If both `--quiet` and `--print-secrets-summary` are set, `--quiet` wins and summary output is suppressed.
+- Refuses to overwrite an existing file unless `--force` is set.
+
 ## `stackforge domains pool add DOMAIN`
 
 Adds a domain to the local domain pool.

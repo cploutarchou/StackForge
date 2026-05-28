@@ -56,15 +56,15 @@ func (e *Executor) Run(ctx context.Context, node string, cmd remoteexec.Command)
 	if len(auth) == 0 {
 		return remoteexec.Result{}, fmt.Errorf("ssh auth method is required")
 	}
-	timeout := e.Timeout
+	dialTimeout := e.Timeout
 	if cmd.Timeout > 0 {
-		timeout = cmd.Timeout
+		dialTimeout = cmd.Timeout
 	}
 	clientConfig := &ssh.ClientConfig{
 		User:            e.User,
 		Auth:            auth,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         timeout,
+		Timeout:         dialTimeout,
 	}
 	addr := net.JoinHostPort(node, fmt.Sprint(e.Port))
 	client, err := ssh.Dial("tcp", addr, clientConfig)
@@ -86,10 +86,20 @@ func (e *Executor) Run(ctx context.Context, node string, cmd remoteexec.Command)
 	session.Stderr = &stderr
 	done := make(chan error, 1)
 	go func() { done <- session.Run(command) }()
+	runCtx := ctx
+	var cancel context.CancelFunc
+	if cmd.Timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, cmd.Timeout)
+	} else if e.Timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, e.Timeout)
+	}
+	if cancel != nil {
+		defer cancel()
+	}
 	select {
-	case <-ctx.Done():
+	case <-runCtx.Done():
 		_ = session.Signal(ssh.SIGKILL)
-		return remoteexec.Result{}, ctx.Err()
+		return remoteexec.Result{}, runCtx.Err()
 	case err := <-done:
 		res := remoteexec.Result{Stdout: remoteexec.Redact(stdout.String(), cmd.Secrets), Stderr: remoteexec.Redact(stderr.String(), cmd.Secrets)}
 		if err != nil {

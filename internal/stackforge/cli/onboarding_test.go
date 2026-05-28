@@ -11,14 +11,15 @@ import (
 
 func TestOnboardRoleAssignmentFromConfig(t *testing.T) {
 	cfg := &config.Config{
-		Cluster: config.ClusterConfig{Name: "stackforge-staging", Environment: "staging"},
+		Cluster: config.ClusterConfig{Name: "stackforge-staging", Environment: "staging", Datacenter: "dc1"},
 		SSH:     config.SSHConfig{User: "deploy", Port: 2222, PrivateKeyPath: "/tmp/key"},
 		Nodes: []config.NodeConfig{{
 			Name:          "node-1",
 			Address:       "10.0.0.10",
 			PublicAddress: "203.0.113.10",
-			Roles:         []string{"consul-server", "nomad-client", "docker-host"},
+			Roles:         []string{"consul-server", "nomad-server", "traefik", "database", "control-plane"},
 		}},
+		ControlPlane: config.ControlPlaneConfig{APIPort: 8080},
 	}
 	inv := inventoryFromConfig(cfg)
 	if len(inv.Nodes) != 1 {
@@ -30,6 +31,27 @@ func TestOnboardRoleAssignmentFromConfig(t *testing.T) {
 	}
 	if node.SSH.User != "deploy" || node.SSH.Port != 2222 || node.SSH.PrivateKeyPath != "/tmp/key" {
 		t.Fatalf("unexpected SSH inventory: %+v", node.SSH)
+	}
+	if node.HealthStatus != "pending-onboarding" {
+		t.Fatalf("unexpected node health status: %q", node.HealthStatus)
+	}
+	if inv.LastHealthCheckStatus != "pending" || inv.FirewallMode != "ufw" {
+		t.Fatalf("unexpected inventory defaults: health=%q firewall=%q", inv.LastHealthCheckStatus, inv.FirewallMode)
+	}
+	if len(inv.ConsulEndpoints) != 1 || inv.ConsulEndpoints[0] != "http://10.0.0.10:8500" {
+		t.Fatalf("unexpected consul endpoints: %+v", inv.ConsulEndpoints)
+	}
+	if len(inv.NomadEndpoints) != 1 || inv.NomadEndpoints[0] != "http://10.0.0.10:4646" {
+		t.Fatalf("unexpected nomad endpoints: %+v", inv.NomadEndpoints)
+	}
+	if len(inv.TraefikEndpoints) != 1 || inv.TraefikEndpoints[0] != "http://203.0.113.10" {
+		t.Fatalf("unexpected traefik endpoints: %+v", inv.TraefikEndpoints)
+	}
+	if inv.DatabaseEndpoint != "10.0.0.10" {
+		t.Fatalf("unexpected database endpoint: %q", inv.DatabaseEndpoint)
+	}
+	if inv.ControlPlaneEndpoint != "http://10.0.0.10:8080" {
+		t.Fatalf("unexpected control plane endpoint: %q", inv.ControlPlaneEndpoint)
 	}
 }
 

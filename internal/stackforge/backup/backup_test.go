@@ -97,6 +97,28 @@ func TestRemoteBackupCommandGenerationUsesInventoryRoles(t *testing.T) {
 	}
 }
 
+func TestBackupDryRunDoesNotPersistInventoryWarnings(t *testing.T) {
+	state := t.TempDir()
+	inv := []byte("cluster_name: stackforge-production\nenvironment: production\ninstall_status: installed\nwarnings: []\n")
+	if err := os.WriteFile(filepath.Join(state, "inventory.yaml"), inv, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunWithOptions(Options{StateDir: state, Cluster: "stackforge-production", DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(state, "inventory.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	if strings.Contains(s, "backup not executed; dry-run or no live executor configured") {
+		t.Fatalf("dry-run backup warning leaked into inventory:\n%s", s)
+	}
+	if strings.Contains(s, "last_backup_id:") {
+		t.Fatalf("dry-run backup should not set last_backup_id:\n%s", s)
+	}
+}
+
 func TestRestorePartialFailureReporting(t *testing.T) {
 	state := t.TempDir()
 	if err := os.WriteFile(filepath.Join(state, "inventory.yaml"), []byte("cluster_name: stackforge-production\n"), 0600); err != nil {

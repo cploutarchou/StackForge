@@ -32,3 +32,32 @@ func TestApplyObservationHarvestsRemoteState(t *testing.T) {
 		t.Fatalf("component/service maps not updated: %+v %+v", inv.ComponentVersions, inv.ServiceStatus)
 	}
 }
+
+func TestNormalizeAppliesProductionReadyDefaultsAndDedupesWarnings(t *testing.T) {
+	inv := &Inventory{
+		Warnings: []string{"EOF", "", "EOF", "  "},
+		Nodes: []Node{{
+			Name:     "node-1",
+			Warnings: []string{"warn-a", "warn-a", ""},
+		}},
+	}
+	Normalize(inv)
+	if inv.InstallStatus != "pending" {
+		t.Fatalf("install status = %q, want pending", inv.InstallStatus)
+	}
+	if inv.LastHealthCheckStatus != "pending" {
+		t.Fatalf("health status = %q, want pending", inv.LastHealthCheckStatus)
+	}
+	if inv.FirewallMode != "ufw" {
+		t.Fatalf("firewall mode = %q, want ufw", inv.FirewallMode)
+	}
+	if len(inv.Warnings) != 0 {
+		t.Fatalf("ephemeral warnings should be filtered: %+v", inv.Warnings)
+	}
+	if inv.Nodes[0].HealthStatus != "pending" {
+		t.Fatalf("node health status = %q, want pending", inv.Nodes[0].HealthStatus)
+	}
+	if len(inv.Nodes[0].Warnings) != 1 || inv.Nodes[0].Warnings[0] != "warn-a" {
+		t.Fatalf("node warnings not deduped/trimmed: %+v", inv.Nodes[0].Warnings)
+	}
+}

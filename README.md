@@ -80,7 +80,7 @@ Core implementation lives under:
 - `internal/controlplane`: HTTP API, auth, domain storage, Cloudflare, Consul, Nomad, reconciliation, and Traefik tag helpers.
 - `migrations`: SQL schema for the control-plane domain tables.
 - `examples`: example YAML cluster configs.
-- `scripts`: release installer script.
+- `scripts`: release installer and operational runbooks (including `run-canary-e2e.sh`).
 
 ## Build
 

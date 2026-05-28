@@ -3,6 +3,7 @@ package verify
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,9 +96,10 @@ func runNodeCommand(ctx context.Context, exec remoteexec.Executor, n inventory.N
 }
 
 func nodeAddresses(n inventory.Node) []string {
+	ordered := orderedNodeAddressCandidates(n)
 	seen := map[string]bool{}
 	var out []string
-	for _, addr := range []string{n.PrivateIP, n.PublicIP} {
+	for _, addr := range ordered {
 		addr = strings.TrimSpace(addr)
 		if addr == "" || seen[addr] {
 			continue
@@ -106,6 +108,30 @@ func nodeAddresses(n inventory.Node) []string {
 		out = append(out, addr)
 	}
 	return out
+}
+
+func orderedNodeAddressCandidates(n inventory.Node) []string {
+	privateIP := strings.TrimSpace(n.PrivateIP)
+	publicIP := strings.TrimSpace(n.PublicIP)
+	if privateIP != "" && publicIP != "" && isRFC1918(privateIP) {
+		return []string{publicIP, privateIP}
+	}
+	return []string{privateIP, publicIP}
+}
+
+func isRFC1918(addr string) bool {
+	ip := net.ParseIP(strings.TrimSpace(addr))
+	if ip == nil {
+		return false
+	}
+	privateRanges := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	for _, cidr := range privateRanges {
+		_, network, err := net.ParseCIDR(cidr)
+		if err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func Command() string {

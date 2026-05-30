@@ -22,6 +22,7 @@ import (
 	"stackforge/internal/stackforge/config"
 	"stackforge/internal/stackforge/install"
 	"stackforge/internal/stackforge/inventory"
+	"stackforge/internal/stackforge/remoteexec"
 	"stackforge/internal/stackforge/rollback"
 	"stackforge/internal/stackforge/safety"
 	sfssh "stackforge/internal/stackforge/ssh"
@@ -343,11 +344,141 @@ func consulCmd() *cobra.Command {
 }
 
 func nomadCmd() *cobra.Command {
+	var namespace, region, datacenter, address string
 	cmd := &cobra.Command{Use: "nomad", Short: "Nomad operations"}
-	for _, n := range []string{"status", "nodes", "jobs", "allocations", "drain-node"} {
-		cmd.AddCommand(&cobra.Command{Use: n, RunE: refuseLive("nomad " + n)})
-	}
+	cmd.PersistentFlags().StringVar(&namespace, "namespace", "default", "Nomad namespace")
+	cmd.PersistentFlags().StringVar(&region, "region", "", "Nomad region override")
+	cmd.PersistentFlags().StringVar(&datacenter, "datacenter", "", "Nomad datacenter hint")
+	cmd.PersistentFlags().StringVar(&address, "address", "", "Nomad HTTP address override")
+	cmd.AddCommand(&cobra.Command{Use: "status", RunE: func(cmd *cobra.Command, args []string) error {
+		return runNomadRead("status", "/v1/status/leader", namespace, region, datacenter, address)
+	}})
+	cmd.AddCommand(&cobra.Command{Use: "nodes", RunE: func(cmd *cobra.Command, args []string) error {
+		return runNomadRead("nodes", "/v1/nodes", namespace, region, datacenter, address)
+	}})
+	cmd.AddCommand(&cobra.Command{Use: "jobs", RunE: func(cmd *cobra.Command, args []string) error {
+		return runNomadRead("jobs", "/v1/jobs", namespace, region, datacenter, address)
+	}})
+	cmd.AddCommand(&cobra.Command{Use: "allocations", RunE: func(cmd *cobra.Command, args []string) error {
+		return runNomadRead("allocations", "/v1/allocations", namespace, region, datacenter, address)
+	}})
+	cmd.AddCommand(&cobra.Command{Use: "drain-node", RunE: refuseLive("nomad drain-node")})
 	return cmd
+}
+
+func runNomadRead(commandName, apiPath, namespace, region, datacenter, address string) error {
+	inv, err := loadInventory()
+	if err != nil {
+		return err
+	}
+	target, err := selectNomadNode(inv)
+	if err != nil {
+		return err
+	}
+	nomadAddr := nomadAddressForRead(inv, strings.TrimSpace(address))
+	warnings := []string{}
+	if strings.TrimSpace(datacenter) != "" {
+		warnings = append(warnings, "datacenter flag is recorded as context only for this read path")
+	}
+	result := map[string]any{
+		"command":    "nomad " + commandName,
+		"cluster":    clusterName(),
+		"target":     target.Name,
+		"dry_run":    rootOpts.dryRun,
+		"status":     "ok",
+		"result":     nil,
+		"warnings":   warnings,
+		"namespace":  strings.TrimSpace(namespace),
+		"region":     strings.TrimSpace(region),
+		"datacenter": strings.TrimSpace(datacenter),
+		"address":    nomadAddr,
+	}
+
+	exec := executorForInventory(inv)
+	if exec == nil || rootOpts.dryRun {
+		result["status"] = "inventory-only"
+		warnings = append(warnings, "no live executor available (or dry-run enabled); returning inventory snapshot")
+		result["warnings"] = warnings
+		result["result"] = map[string]any{
+			"nomad_endpoints": inv.NomadEndpoints,
+			"node_count":      len(inv.Nodes),
+		}
+		return output(result)
+	}
+
+	targetAddr := targetAddress(target)
+	if strings.TrimSpace(targetAddr) == "" {
+		return fmt.Errorf("node %s has no reachable address", target.Name)
+	}
+
+	remote := buildNomadReadRemoteCommand(nomadAddr, apiPath, strings.TrimSpace(namespace), strings.TrimSpace(region))
+	runResult, runErr := exec.Run(context.Background(), targetAddr, remoteexec.Command{Command: remote, Sudo: true})
+	if runErr != nil {
+		result["status"] = "error"
+		warnings = append(warnings, strings.TrimSpace(runResult.Stderr))
+		result["warnings"] = warnings
+		if strings.TrimSpace(runResult.Stdout) != "" {
+			result["result"] = strings.TrimSpace(runResult.Stdout)
+		}
+		if rootOpts.output == "json" {
+			_ = output(result)
+		}
+		return fmt.Errorf("nomad %s failed on %s: %w", commandName, target.Name, runErr)
+	}
+
+	decoded := decodeNomadPayload(runResult.Stdout)
+	result["result"] = decoded
+	result["warnings"] = warnings
+	return output(result)
+}
+
+func selectNomadNode(inv *inventory.Inventory) (inventory.Node, error) {
+	if inv == nil || len(inv.Nodes) == 0 {
+		return inventory.Node{}, fmt.Errorf("inventory has no nodes")
+	}
+	for _, n := range inv.Nodes {
+		if hasRole(n.Roles, "nomad-server") {
+			return n, nil
+		}
+	}
+	return inv.Nodes[0], nil
+}
+
+func nomadAddressForRead(inv *inventory.Inventory, override string) string {
+	override = strings.TrimSpace(override)
+	if override != "" {
+		return override
+	}
+	if inv != nil && len(inv.NomadEndpoints) > 0 {
+		if endpoint := strings.TrimSpace(inv.NomadEndpoints[0]); endpoint != "" {
+			return endpoint
+		}
+	}
+	return "http://127.0.0.1:4646"
+}
+
+func buildNomadReadRemoteCommand(address, apiPath, namespace, region string) string {
+	parts := []string{}
+	if namespace != "" {
+		parts = append(parts, "export NOMAD_NAMESPACE="+shellQuote(namespace))
+	}
+	if region != "" {
+		parts = append(parts, "export NOMAD_REGION="+shellQuote(region))
+	}
+	parts = append(parts, "curl -fsS "+shellQuote(strings.TrimRight(address, "/")+apiPath))
+	return strings.Join(parts, " && ")
+}
+
+func decodeNomadPayload(raw string) any {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return map[string]any{}
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(text), &parsed); err == nil {
+		return parsed
+	}
+	return text
 }
 
 func traefikCmd() *cobra.Command {

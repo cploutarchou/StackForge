@@ -258,6 +258,100 @@ Control-plane health:
 curl http://127.0.0.1:8080/health
 ```
 
+## Nomad Day-2 Operations
+
+Read cluster state:
+
+```bash
+stackforge nomad status --config stackforge.yaml
+stackforge nomad nodes --config stackforge.yaml
+stackforge nomad jobs --config stackforge.yaml
+stackforge nomad allocations --config stackforge.yaml
+```
+
+Inspect allocation details:
+
+```bash
+stackforge nomad alloc status <alloc-id> --config stackforge.yaml
+stackforge nomad alloc logs <alloc-id> --task <task-name> --config stackforge.yaml
+```
+
+Plan job changes first:
+
+```bash
+stackforge nomad job plan ./job.hcl --config stackforge.yaml
+```
+
+Apply or stop jobs (live-changing):
+
+```bash
+stackforge nomad job run ./job.hcl --config stackforge.yaml --confirm-production
+stackforge nomad job stop <job-id> --config stackforge.yaml --confirm-production
+stackforge nomad drain-node <node-id> --config stackforge.yaml --confirm-production
+```
+
+Safety notes:
+
+- Use `--dry-run` to force planning behavior.
+- Live-changing Nomad operations require confirmation unless `--yes`.
+- Production inventory context requires `--confirm-production`.
+- To disable an active node drain, run:
+
+```bash
+stackforge nomad drain-node <node-id> --disable --config stackforge.yaml --confirm-production
+```
+
+## Consul Day-2 Operations
+
+Read cluster state:
+
+```bash
+stackforge consul status --config stackforge.yaml
+stackforge consul members --config stackforge.yaml
+stackforge consul services --config stackforge.yaml
+stackforge consul intentions list --config stackforge.yaml
+```
+
+KV operations:
+
+```bash
+stackforge consul kv get app/config --config stackforge.yaml
+stackforge consul kv put app/config value --config stackforge.yaml --confirm-production
+```
+
+Snapshot operations:
+
+```bash
+stackforge consul snapshot save /var/backups/consul.snap --config stackforge.yaml
+stackforge consul snapshot restore /var/backups/consul.snap --config stackforge.yaml --confirm-production
+```
+
+Optional read tuning:
+
+```bash
+stackforge consul members --config stackforge.yaml --dc dc1 --stale
+```
+
+Safety notes:
+
+- `kv put` is live-changing and requires confirmation unless `--yes`.
+- Production inventory context requires `--confirm-production`.
+
+Auth token notes:
+
+- Set `NOMAD_TOKEN` (or `STACKFORGE_NOMAD_TOKEN`) for Nomad ACL-protected operations.
+- Set `CONSUL_HTTP_TOKEN` (or `STACKFORGE_CONSUL_HTTP_TOKEN`) for Consul ACL-protected operations.
+
+## Traefik + Consul Catalog Diagnostics
+
+Run provider-oriented checks:
+
+```bash
+stackforge traefik consul-catalog check --config stackforge.yaml
+```
+
+Use this output to verify Consul endpoints, Traefik role presence, and key provider hardening recommendations.
+
 ## Backups
 
 Dry-run backup:

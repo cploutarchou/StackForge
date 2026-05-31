@@ -618,33 +618,69 @@ Expected behavior:
 
 ## Consul Commands
 
-Registered commands:
+Supported commands:
 
 - `stackforge consul status`
 - `stackforge consul members`
+- `stackforge consul services`
 - `stackforge consul kv get KEY`
 - `stackforge consul kv put KEY VALUE`
+- `stackforge consul intentions list`
 - `stackforge consul snapshot save PATH`
 - `stackforge consul snapshot restore PATH`
 
+Flags:
+
+- `--consul-http-addr`: Consul HTTP endpoint override.
+- `--dc`: Consul datacenter override.
+- `--stale`: allow stale Consul reads where applicable.
+
 Current behavior:
 
-- All return an error: live component client configuration from inventory and secrets is required.
-- They intentionally refuse to fake production behavior.
+- `status`, `members`, `services`, `intentions list`, and `kv get` execute read-only operations over SSH against a selected Consul node.
+- `kv put` is live-changing and requires confirmation unless `--yes`.
+- In production inventory context, live-changing operations require `--confirm-production`.
+- If no live executor is available or `--dry-run` is set, commands return inventory-only/planned output.
+- `snapshot save` executes on a selected Consul node and writes snapshot data to the provided remote path.
+- `snapshot restore` is live-changing and requires confirmation unless `--yes`.
+- In production inventory context, live-changing operations require `--confirm-production`.
 
 ## Nomad Commands
 
-Registered commands:
+Supported commands:
 
 - `stackforge nomad status`
 - `stackforge nomad nodes`
 - `stackforge nomad jobs`
 - `stackforge nomad allocations`
+- `stackforge nomad alloc status ALLOC_ID`
+- `stackforge nomad alloc logs ALLOC_ID [--task TASK]`
+- `stackforge nomad job plan FILE`
+- `stackforge nomad job run FILE`
+- `stackforge nomad job stop JOB_ID`
 - `stackforge nomad drain-node`
+
+Flags:
+
+- `--namespace`: Nomad namespace (default `default`).
+- `--region`: Nomad region override.
+- `--datacenter`: context hint for operator reporting.
+- `--address`: Nomad HTTP endpoint override.
 
 Current behavior:
 
-- All return a refusal error until live client configuration is implemented.
+- Read commands (`status`, `nodes`, `jobs`, `allocations`, allocation diagnostics) run over SSH against a selected Nomad node.
+- `job plan` runs read-only plan behavior remotely.
+- `job run` and `job stop` are live-changing and require confirmation unless `--yes`.
+- In production inventory context, live-changing operations require `--confirm-production`.
+- `--dry-run` forces planning behavior for job actions and inventory-only behavior for read paths without live executor.
+- `drain-node NODE_ID` is enabled and live-changing. Use `--disable` to clear drain mode.
+- In production inventory context, drain operations require `--confirm-production`.
+
+Token/auth integration notes:
+
+- Nomad commands read `NOMAD_TOKEN` (or `STACKFORGE_NOMAD_TOKEN`) when set.
+- Consul commands read `CONSUL_HTTP_TOKEN` (or `STACKFORGE_CONSUL_HTTP_TOKEN`) when set.
 
 ## Traefik Commands
 
@@ -654,10 +690,14 @@ Registered commands:
 - `stackforge traefik routes`
 - `stackforge traefik reload`
 - `stackforge traefik logs`
+- `stackforge traefik consul-catalog check`
+- `stackforge traefik lint-config PATH`
 
 Current behavior:
 
-- All return a refusal error until live client configuration is implemented.
+- `status`, `routes`, `reload`, and `logs` still refuse live behavior in this phase.
+- `consul-catalog check` performs a safety-oriented diagnostics pass using inventory and optional `--config` context, returning severity-based findings.
+- `lint-config` validates Traefik static configuration files locally.
 
 ## Database Commands
 

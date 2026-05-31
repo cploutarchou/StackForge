@@ -330,21 +330,46 @@ func domainsCmd() *cobra.Command {
 }
 
 func consulCmd() *cobra.Command {
+	var address, datacenter string
+	var stale bool
 	cmd := &cobra.Command{Use: "consul", Short: "Consul operations"}
-	cmd.AddCommand(&cobra.Command{Use: "status", RunE: refuseLive("consul status")})
-	cmd.AddCommand(&cobra.Command{Use: "members", RunE: refuseLive("consul members")})
+	cmd.PersistentFlags().StringVar(&address, "consul-http-addr", "", "Consul HTTP address override")
+	cmd.PersistentFlags().StringVar(&datacenter, "dc", "", "Consul datacenter override")
+	cmd.PersistentFlags().BoolVar(&stale, "stale", false, "allow stale Consul reads where supported")
+	cmd.AddCommand(&cobra.Command{Use: "status", RunE: func(cmd *cobra.Command, args []string) error {
+		return runConsulRead("status", "/v1/status/leader", address, datacenter, stale)
+	}})
+	cmd.AddCommand(&cobra.Command{Use: "members", RunE: func(cmd *cobra.Command, args []string) error {
+		return runConsulRead("members", "/v1/agent/members", address, datacenter, stale)
+	}})
+	cmd.AddCommand(&cobra.Command{Use: "services", RunE: func(cmd *cobra.Command, args []string) error {
+		return runConsulRead("services", "/v1/catalog/services", address, datacenter, stale)
+	}})
+	intentions := &cobra.Command{Use: "intentions", Short: "Consul intentions operations"}
+	intentions.AddCommand(&cobra.Command{Use: "list", RunE: func(cmd *cobra.Command, args []string) error {
+		return runConsulRead("intentions list", "/v1/connect/intentions", address, datacenter, stale)
+	}})
 	kv := &cobra.Command{Use: "kv"}
-	kv.AddCommand(&cobra.Command{Use: "get KEY", Args: cobra.ExactArgs(1), RunE: refuseLive("consul kv get")})
-	kv.AddCommand(&cobra.Command{Use: "put KEY VALUE", Args: cobra.ExactArgs(2), RunE: refuseLive("consul kv put")})
+	kv.AddCommand(&cobra.Command{Use: "get KEY", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		return runConsulKVGet(args[0], address, datacenter, stale)
+	}})
+	kv.AddCommand(&cobra.Command{Use: "put KEY VALUE", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		return runConsulKVPut(args[0], args[1], address, datacenter)
+	}})
 	snapshot := &cobra.Command{Use: "snapshot"}
-	snapshot.AddCommand(&cobra.Command{Use: "save PATH", Args: cobra.ExactArgs(1), RunE: refuseLive("consul snapshot save")})
-	snapshot.AddCommand(&cobra.Command{Use: "restore PATH", Args: cobra.ExactArgs(1), RunE: refuseLive("consul snapshot restore")})
-	cmd.AddCommand(kv, snapshot)
+	snapshot.AddCommand(&cobra.Command{Use: "save PATH", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		return runConsulSnapshotSave(args[0], address, datacenter)
+	}})
+	snapshot.AddCommand(&cobra.Command{Use: "restore PATH", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		return runConsulSnapshotRestore(args[0], address, datacenter)
+	}})
+	cmd.AddCommand(kv, intentions, snapshot)
 	return cmd
 }
 
 func nomadCmd() *cobra.Command {
 	var namespace, region, datacenter, address string
+	var drainDisable bool
 	cmd := &cobra.Command{Use: "nomad", Short: "Nomad operations"}
 	cmd.PersistentFlags().StringVar(&namespace, "namespace", "default", "Nomad namespace")
 	cmd.PersistentFlags().StringVar(&region, "region", "", "Nomad region override")
@@ -362,7 +387,33 @@ func nomadCmd() *cobra.Command {
 	cmd.AddCommand(&cobra.Command{Use: "allocations", RunE: func(cmd *cobra.Command, args []string) error {
 		return runNomadRead("allocations", "/v1/allocations", namespace, region, datacenter, address)
 	}})
-	cmd.AddCommand(&cobra.Command{Use: "drain-node", RunE: refuseLive("nomad drain-node")})
+	alloc := &cobra.Command{Use: "alloc", Short: "Nomad allocation diagnostics"}
+	var allocTask string
+	allocStatus := &cobra.Command{Use: "status ALLOC_ID", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		return runNomadAllocStatus(args[0], namespace, region, datacenter, address)
+	}}
+	allocLogs := &cobra.Command{Use: "logs ALLOC_ID", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		return runNomadAllocLogs(args[0], allocTask, namespace, region, datacenter, address)
+	}}
+	allocLogs.Flags().StringVar(&allocTask, "task", "", "task name for allocation logs")
+	alloc.AddCommand(allocStatus, allocLogs)
+	cmd.AddCommand(alloc)
+	job := &cobra.Command{Use: "job", Short: "Nomad job lifecycle operations"}
+	job.AddCommand(&cobra.Command{Use: "plan FILE", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		return runNomadJobPlan(args[0], namespace, region, datacenter, address)
+	}})
+	job.AddCommand(&cobra.Command{Use: "run FILE", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		return runNomadJobRun(args[0], namespace, region, datacenter, address)
+	}})
+	job.AddCommand(&cobra.Command{Use: "stop JOB_ID", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		return runNomadJobStop(args[0], namespace, region, datacenter, address)
+	}})
+	cmd.AddCommand(job)
+	drain := &cobra.Command{Use: "drain-node NODE_ID", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		return runNomadDrainNode(args[0], drainDisable, region, datacenter, address)
+	}}
+	drain.Flags().BoolVar(&drainDisable, "disable", false, "disable drain mode instead of enabling it")
+	cmd.AddCommand(drain)
 	return cmd
 }
 
@@ -459,6 +510,9 @@ func nomadAddressForRead(inv *inventory.Inventory, override string) string {
 
 func buildNomadReadRemoteCommand(address, apiPath, namespace, region string) string {
 	parts := []string{}
+	if token := nomadAuthToken(); strings.TrimSpace(token) != "" {
+		parts = append(parts, "export NOMAD_TOKEN="+shellQuote(strings.TrimSpace(token)))
+	}
 	if namespace != "" {
 		parts = append(parts, "export NOMAD_NAMESPACE="+shellQuote(namespace))
 	}
@@ -481,11 +535,798 @@ func decodeNomadPayload(raw string) any {
 	return text
 }
 
+func runNomadJobPlan(filePath, namespace, region, datacenter, address string) error {
+	b, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read job file %s: %w", filePath, err)
+	}
+	_, target, targetAddr, nomadAddr, exec, err := resolveNomadExecution(address)
+	if err != nil {
+		return err
+	}
+	warnings := []string{}
+	if strings.TrimSpace(datacenter) != "" {
+		warnings = append(warnings, "datacenter flag is recorded as context only for this plan path")
+	}
+	result := map[string]any{
+		"command":    "nomad job plan",
+		"cluster":    clusterName(),
+		"target":     target.Name,
+		"dry_run":    rootOpts.dryRun,
+		"status":     "ok",
+		"result":     nil,
+		"warnings":   warnings,
+		"namespace":  strings.TrimSpace(namespace),
+		"region":     strings.TrimSpace(region),
+		"datacenter": strings.TrimSpace(datacenter),
+		"address":    nomadAddr,
+		"job_file":   filePath,
+	}
+	if exec == nil || rootOpts.dryRun {
+		result["status"] = "inventory-only"
+		warnings = append(warnings, "no live executor available (or dry-run enabled); plan was not executed remotely")
+		result["warnings"] = warnings
+		result["result"] = map[string]any{"planned": true}
+		return output(result)
+	}
+	remotePath := nomadRemoteJobPath(filePath)
+	if err := writeRemoteFile(context.Background(), exec, targetAddr, remotePath, b); err != nil {
+		return err
+	}
+	remote := buildNomadJobRemoteCommand(nomadAddr, namespace, region, "plan", remotePath)
+	runResult, runErr := exec.Run(context.Background(), targetAddr, remoteexec.Command{Command: remote, Sudo: true})
+	if strings.TrimSpace(runResult.Stdout) != "" {
+		result["result"] = strings.TrimSpace(runResult.Stdout)
+	}
+	if runErr != nil {
+		result["status"] = "error"
+		if strings.TrimSpace(runResult.Stderr) != "" {
+			warnings = append(warnings, strings.TrimSpace(runResult.Stderr))
+		}
+		result["warnings"] = warnings
+		if rootOpts.output == "json" {
+			_ = output(result)
+		}
+		return fmt.Errorf("nomad job plan failed on %s: %w", target.Name, runErr)
+	}
+	result["warnings"] = warnings
+	return output(result)
+}
+
+func runNomadJobRun(filePath, namespace, region, datacenter, address string) error {
+	if rootOpts.dryRun {
+		return runNomadJobPlan(filePath, namespace, region, datacenter, address)
+	}
+	b, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("read job file %s: %w", filePath, err)
+	}
+	inv, target, targetAddr, nomadAddr, exec, err := resolveNomadExecution(address)
+	if err != nil {
+		return err
+	}
+	if exec == nil {
+		return fmt.Errorf("unable to resolve SSH executor; pass --config with valid ssh settings or ensure inventory has SSH credentials")
+	}
+	if err := enforceNomadLiveSafety(inv, "nomad job run "+filepath.Base(filePath)); err != nil {
+		return err
+	}
+	warnings := []string{}
+	if strings.TrimSpace(datacenter) != "" {
+		warnings = append(warnings, "datacenter flag is recorded as context only for this run path")
+	}
+	result := map[string]any{
+		"command":    "nomad job run",
+		"cluster":    clusterName(),
+		"target":     target.Name,
+		"dry_run":    false,
+		"status":     "ok",
+		"result":     nil,
+		"warnings":   warnings,
+		"namespace":  strings.TrimSpace(namespace),
+		"region":     strings.TrimSpace(region),
+		"datacenter": strings.TrimSpace(datacenter),
+		"address":    nomadAddr,
+		"job_file":   filePath,
+	}
+	remotePath := nomadRemoteJobPath(filePath)
+	if err := writeRemoteFile(context.Background(), exec, targetAddr, remotePath, b); err != nil {
+		return err
+	}
+	remote := buildNomadJobRemoteCommand(nomadAddr, namespace, region, "run", remotePath)
+	runResult, runErr := exec.Run(context.Background(), targetAddr, remoteexec.Command{Command: remote, Sudo: true})
+	if strings.TrimSpace(runResult.Stdout) != "" {
+		result["result"] = strings.TrimSpace(runResult.Stdout)
+	}
+	if runErr != nil {
+		result["status"] = "error"
+		if strings.TrimSpace(runResult.Stderr) != "" {
+			warnings = append(warnings, strings.TrimSpace(runResult.Stderr))
+		}
+		result["warnings"] = warnings
+		if rootOpts.output == "json" {
+			_ = output(result)
+		}
+		return fmt.Errorf("nomad job run failed on %s: %w", target.Name, runErr)
+	}
+	result["warnings"] = warnings
+	return output(result)
+}
+
+func runNomadJobStop(jobID, namespace, region, datacenter, address string) error {
+	inv, target, targetAddr, nomadAddr, exec, err := resolveNomadExecution(address)
+	if err != nil {
+		return err
+	}
+	warnings := []string{}
+	if strings.TrimSpace(datacenter) != "" {
+		warnings = append(warnings, "datacenter flag is recorded as context only for this stop path")
+	}
+	result := map[string]any{
+		"command":    "nomad job stop",
+		"cluster":    clusterName(),
+		"target":     target.Name,
+		"dry_run":    rootOpts.dryRun,
+		"status":     "ok",
+		"result":     nil,
+		"warnings":   warnings,
+		"namespace":  strings.TrimSpace(namespace),
+		"region":     strings.TrimSpace(region),
+		"datacenter": strings.TrimSpace(datacenter),
+		"address":    nomadAddr,
+		"job_id":     strings.TrimSpace(jobID),
+	}
+	if rootOpts.dryRun {
+		result["status"] = "planned"
+		result["result"] = map[string]any{"would_stop": strings.TrimSpace(jobID)}
+		return output(result)
+	}
+	if exec == nil {
+		return fmt.Errorf("unable to resolve SSH executor; pass --config with valid ssh settings or ensure inventory has SSH credentials")
+	}
+	if err := enforceNomadLiveSafety(inv, "nomad job stop "+strings.TrimSpace(jobID)); err != nil {
+		return err
+	}
+	remote := buildNomadJobStopRemoteCommand(nomadAddr, namespace, region, strings.TrimSpace(jobID))
+	runResult, runErr := exec.Run(context.Background(), targetAddr, remoteexec.Command{Command: remote, Sudo: true})
+	if strings.TrimSpace(runResult.Stdout) != "" {
+		result["result"] = strings.TrimSpace(runResult.Stdout)
+	}
+	if runErr != nil {
+		result["status"] = "error"
+		if strings.TrimSpace(runResult.Stderr) != "" {
+			warnings = append(warnings, strings.TrimSpace(runResult.Stderr))
+		}
+		result["warnings"] = warnings
+		if rootOpts.output == "json" {
+			_ = output(result)
+		}
+		return fmt.Errorf("nomad job stop failed on %s: %w", target.Name, runErr)
+	}
+	result["warnings"] = warnings
+	return output(result)
+}
+
+func resolveNomadExecution(address string) (*inventory.Inventory, inventory.Node, string, string, *sfssh.Executor, error) {
+	inv, err := loadInventory()
+	if err != nil {
+		return nil, inventory.Node{}, "", "", nil, err
+	}
+	target, err := selectNomadNode(inv)
+	if err != nil {
+		return nil, inventory.Node{}, "", "", nil, err
+	}
+	targetAddr := targetAddress(target)
+	if strings.TrimSpace(targetAddr) == "" {
+		return nil, inventory.Node{}, "", "", nil, fmt.Errorf("node %s has no reachable address", target.Name)
+	}
+	nomadAddr := nomadAddressForRead(inv, strings.TrimSpace(address))
+	return inv, target, targetAddr, nomadAddr, executorForInventory(inv), nil
+}
+
+func enforceNomadLiveSafety(inv *inventory.Inventory, confirmationText string) error {
+	if inv != nil && strings.EqualFold(strings.TrimSpace(inv.Environment), "production") && !rootOpts.confirmProduction {
+		return fmt.Errorf("live nomad operation against production inventory requires --confirm-production")
+	}
+	if !rootOpts.yes {
+		return confirmText(confirmationText)
+	}
+	return nil
+}
+
+func nomadRemoteJobPath(filePath string) string {
+	base := sanitizeDeployName(filepath.Base(filePath))
+	if base == "" {
+		base = "job"
+	}
+	return "/tmp/stackforge-nomad-" + base + ".hcl"
+}
+
+func buildNomadJobRemoteCommand(address, namespace, region, mode, remotePath string) string {
+	parts := []string{}
+	if token := nomadAuthToken(); strings.TrimSpace(token) != "" {
+		parts = append(parts, "export NOMAD_TOKEN="+shellQuote(strings.TrimSpace(token)))
+	}
+	if strings.TrimSpace(namespace) != "" {
+		parts = append(parts, "export NOMAD_NAMESPACE="+shellQuote(strings.TrimSpace(namespace)))
+	}
+	if strings.TrimSpace(region) != "" {
+		parts = append(parts, "export NOMAD_REGION="+shellQuote(strings.TrimSpace(region)))
+	}
+	parts = append(parts, "nomad job "+mode+" -address="+shellQuote(strings.TrimSpace(address))+" "+shellQuote(strings.TrimSpace(remotePath)))
+	return strings.Join(parts, " && ")
+}
+
+func buildNomadJobStopRemoteCommand(address, namespace, region, jobID string) string {
+	parts := []string{}
+	if token := nomadAuthToken(); strings.TrimSpace(token) != "" {
+		parts = append(parts, "export NOMAD_TOKEN="+shellQuote(strings.TrimSpace(token)))
+	}
+	if strings.TrimSpace(namespace) != "" {
+		parts = append(parts, "export NOMAD_NAMESPACE="+shellQuote(strings.TrimSpace(namespace)))
+	}
+	if strings.TrimSpace(region) != "" {
+		parts = append(parts, "export NOMAD_REGION="+shellQuote(strings.TrimSpace(region)))
+	}
+	parts = append(parts, "nomad job stop -yes -address="+shellQuote(strings.TrimSpace(address))+" "+shellQuote(strings.TrimSpace(jobID)))
+	return strings.Join(parts, " && ")
+}
+
+func runNomadAllocStatus(allocID, namespace, region, datacenter, address string) error {
+	_, target, targetAddr, nomadAddr, exec, err := resolveNomadExecution(address)
+	if err != nil {
+		return err
+	}
+	warnings := []string{}
+	if strings.TrimSpace(datacenter) != "" {
+		warnings = append(warnings, "datacenter flag is recorded as context only for this allocation status path")
+	}
+	result := map[string]any{
+		"command":    "nomad alloc status",
+		"cluster":    clusterName(),
+		"target":     target.Name,
+		"dry_run":    rootOpts.dryRun,
+		"status":     "ok",
+		"result":     nil,
+		"warnings":   warnings,
+		"namespace":  strings.TrimSpace(namespace),
+		"region":     strings.TrimSpace(region),
+		"datacenter": strings.TrimSpace(datacenter),
+		"address":    nomadAddr,
+		"alloc_id":   strings.TrimSpace(allocID),
+	}
+	if exec == nil || rootOpts.dryRun {
+		result["status"] = "inventory-only"
+		warnings = append(warnings, "no live executor available (or dry-run enabled); allocation status was not fetched")
+		result["warnings"] = warnings
+		return output(result)
+	}
+	remote := buildNomadAllocRemoteCommand(nomadAddr, namespace, region, "status", strings.TrimSpace(allocID), "")
+	runResult, runErr := exec.Run(context.Background(), targetAddr, remoteexec.Command{Command: remote, Sudo: true})
+	result["result"] = decodeNomadPayload(runResult.Stdout)
+	if runErr != nil {
+		result["status"] = "error"
+		if strings.TrimSpace(runResult.Stderr) != "" {
+			warnings = append(warnings, strings.TrimSpace(runResult.Stderr))
+		}
+		result["warnings"] = warnings
+		if rootOpts.output == "json" {
+			_ = output(result)
+		}
+		return fmt.Errorf("nomad alloc status failed on %s: %w", target.Name, runErr)
+	}
+	result["warnings"] = warnings
+	return output(result)
+}
+
+func runNomadAllocLogs(allocID, task, namespace, region, datacenter, address string) error {
+	_, target, targetAddr, nomadAddr, exec, err := resolveNomadExecution(address)
+	if err != nil {
+		return err
+	}
+	warnings := []string{}
+	if strings.TrimSpace(datacenter) != "" {
+		warnings = append(warnings, "datacenter flag is recorded as context only for this allocation logs path")
+	}
+	result := map[string]any{
+		"command":    "nomad alloc logs",
+		"cluster":    clusterName(),
+		"target":     target.Name,
+		"dry_run":    rootOpts.dryRun,
+		"status":     "ok",
+		"result":     nil,
+		"warnings":   warnings,
+		"namespace":  strings.TrimSpace(namespace),
+		"region":     strings.TrimSpace(region),
+		"datacenter": strings.TrimSpace(datacenter),
+		"address":    nomadAddr,
+		"alloc_id":   strings.TrimSpace(allocID),
+		"task":       strings.TrimSpace(task),
+	}
+	if exec == nil || rootOpts.dryRun {
+		result["status"] = "inventory-only"
+		warnings = append(warnings, "no live executor available (or dry-run enabled); allocation logs were not fetched")
+		result["warnings"] = warnings
+		return output(result)
+	}
+	remote := buildNomadAllocRemoteCommand(nomadAddr, namespace, region, "logs", strings.TrimSpace(allocID), strings.TrimSpace(task))
+	runResult, runErr := exec.Run(context.Background(), targetAddr, remoteexec.Command{Command: remote, Sudo: true})
+	result["result"] = strings.TrimSpace(runResult.Stdout)
+	if runErr != nil {
+		result["status"] = "error"
+		if strings.TrimSpace(runResult.Stderr) != "" {
+			warnings = append(warnings, strings.TrimSpace(runResult.Stderr))
+		}
+		result["warnings"] = warnings
+		if rootOpts.output == "json" {
+			_ = output(result)
+		}
+		return fmt.Errorf("nomad alloc logs failed on %s: %w", target.Name, runErr)
+	}
+	result["warnings"] = warnings
+	return output(result)
+}
+
+func buildNomadAllocRemoteCommand(address, namespace, region, mode, allocID, task string) string {
+	parts := []string{}
+	if token := nomadAuthToken(); strings.TrimSpace(token) != "" {
+		parts = append(parts, "export NOMAD_TOKEN="+shellQuote(strings.TrimSpace(token)))
+	}
+	if strings.TrimSpace(namespace) != "" {
+		parts = append(parts, "export NOMAD_NAMESPACE="+shellQuote(strings.TrimSpace(namespace)))
+	}
+	if strings.TrimSpace(region) != "" {
+		parts = append(parts, "export NOMAD_REGION="+shellQuote(strings.TrimSpace(region)))
+	}
+	base := "nomad alloc " + mode + " -address=" + shellQuote(strings.TrimSpace(address))
+	if strings.TrimSpace(mode) == "status" {
+		base += " -json"
+	}
+	if strings.TrimSpace(mode) == "logs" && strings.TrimSpace(task) != "" {
+		base += " -task " + shellQuote(strings.TrimSpace(task))
+	}
+	base += " " + shellQuote(strings.TrimSpace(allocID))
+	parts = append(parts, base)
+	return strings.Join(parts, " && ")
+}
+
+func runConsulRead(commandName, apiPath, address, datacenter string, stale bool) error {
+	inv, target, targetAddr, consulAddr, exec, err := resolveConsulExecution(address)
+	if err != nil {
+		return err
+	}
+	query := []string{}
+	if strings.TrimSpace(datacenter) != "" {
+		query = append(query, "dc="+urlQueryEscape(strings.TrimSpace(datacenter)))
+	}
+	if stale {
+		query = append(query, "stale")
+	}
+	endpoint := apiPath
+	if len(query) > 0 {
+		endpoint += "?" + strings.Join(query, "&")
+	}
+	warnings := []string{}
+	result := map[string]any{
+		"command":    "consul " + commandName,
+		"cluster":    clusterName(),
+		"target":     target.Name,
+		"dry_run":    rootOpts.dryRun,
+		"status":     "ok",
+		"result":     nil,
+		"warnings":   warnings,
+		"address":    consulAddr,
+		"datacenter": strings.TrimSpace(datacenter),
+		"stale":      stale,
+	}
+	if exec == nil || rootOpts.dryRun {
+		result["status"] = "inventory-only"
+		warnings = append(warnings, "no live executor available (or dry-run enabled); returning inventory snapshot")
+		result["warnings"] = warnings
+		result["result"] = map[string]any{
+			"consul_endpoints": inv.ConsulEndpoints,
+			"node_count":       len(inv.Nodes),
+		}
+		return output(result)
+	}
+	remote, secrets := buildConsulCurlCommand(strings.TrimRight(consulAddr, "/")+endpoint, "GET", "")
+	runResult, runErr := exec.Run(context.Background(), targetAddr, remoteexec.Command{Command: remote, Sudo: true, Secrets: secrets})
+	result["result"] = decodeNomadPayload(runResult.Stdout)
+	if runErr != nil {
+		result["status"] = "error"
+		if strings.TrimSpace(runResult.Stderr) != "" {
+			warnings = append(warnings, strings.TrimSpace(runResult.Stderr))
+		}
+		result["warnings"] = warnings
+		if rootOpts.output == "json" {
+			_ = output(result)
+		}
+		return normalizeRemoteError("consul "+commandName, target.Name, runResult, runErr)
+	}
+	result["warnings"] = warnings
+	return output(result)
+}
+
+func runConsulKVGet(key, address, datacenter string, stale bool) error {
+	inv, target, targetAddr, consulAddr, exec, err := resolveConsulExecution(address)
+	if err != nil {
+		return err
+	}
+	query := []string{"raw"}
+	if strings.TrimSpace(datacenter) != "" {
+		query = append(query, "dc="+urlQueryEscape(strings.TrimSpace(datacenter)))
+	}
+	if stale {
+		query = append(query, "stale")
+	}
+	endpoint := "/v1/kv/" + strings.ReplaceAll(strings.TrimSpace(key), " ", "%20") + "?" + strings.Join(query, "&")
+	result := map[string]any{
+		"command":    "consul kv get",
+		"cluster":    clusterName(),
+		"target":     target.Name,
+		"dry_run":    rootOpts.dryRun,
+		"status":     "ok",
+		"result":     nil,
+		"warnings":   []string{},
+		"address":    consulAddr,
+		"datacenter": strings.TrimSpace(datacenter),
+		"stale":      stale,
+		"key":        strings.TrimSpace(key),
+	}
+	if exec == nil || rootOpts.dryRun {
+		result["status"] = "inventory-only"
+		result["warnings"] = []string{"no live executor available (or dry-run enabled); returning inventory snapshot"}
+		result["result"] = map[string]any{"consul_endpoints": inv.ConsulEndpoints, "node_count": len(inv.Nodes)}
+		return output(result)
+	}
+	remote, secrets := buildConsulCurlCommand(strings.TrimRight(consulAddr, "/")+endpoint, "GET", "")
+	runResult, runErr := exec.Run(context.Background(), targetAddr, remoteexec.Command{Command: remote, Sudo: true, Secrets: secrets})
+	result["result"] = strings.TrimSpace(runResult.Stdout)
+	if runErr != nil {
+		result["status"] = "error"
+		warnings := []string{}
+		if strings.TrimSpace(runResult.Stderr) != "" {
+			warnings = append(warnings, strings.TrimSpace(runResult.Stderr))
+		}
+		result["warnings"] = warnings
+		if rootOpts.output == "json" {
+			_ = output(result)
+		}
+		return normalizeRemoteError("consul kv get", target.Name, runResult, runErr)
+	}
+	return output(result)
+}
+
+func runConsulKVPut(key, value, address, datacenter string) error {
+	inv, target, targetAddr, consulAddr, exec, err := resolveConsulExecution(address)
+	if err != nil {
+		return err
+	}
+	result := map[string]any{
+		"command":    "consul kv put",
+		"cluster":    clusterName(),
+		"target":     target.Name,
+		"dry_run":    rootOpts.dryRun,
+		"status":     "ok",
+		"result":     nil,
+		"warnings":   []string{},
+		"address":    consulAddr,
+		"datacenter": strings.TrimSpace(datacenter),
+		"key":        strings.TrimSpace(key),
+	}
+	if rootOpts.dryRun {
+		result["status"] = "planned"
+		result["result"] = map[string]any{"would_put": strings.TrimSpace(key)}
+		return output(result)
+	}
+	if exec == nil {
+		return fmt.Errorf("unable to resolve SSH executor; pass --config with valid ssh settings or ensure inventory has SSH credentials")
+	}
+	if err := enforceConsulLiveSafety(inv, "consul kv put "+strings.TrimSpace(key)); err != nil {
+		return err
+	}
+	query := []string{}
+	if strings.TrimSpace(datacenter) != "" {
+		query = append(query, "dc="+urlQueryEscape(strings.TrimSpace(datacenter)))
+	}
+	endpoint := "/v1/kv/" + strings.ReplaceAll(strings.TrimSpace(key), " ", "%20")
+	if len(query) > 0 {
+		endpoint += "?" + strings.Join(query, "&")
+	}
+	remote, secrets := buildConsulCurlCommand(strings.TrimRight(consulAddr, "/")+endpoint, "PUT", value)
+	secrets = append(secrets, value)
+	runResult, runErr := exec.Run(context.Background(), targetAddr, remoteexec.Command{Command: remote, Sudo: true, Secrets: secrets})
+	result["result"] = decodeNomadPayload(runResult.Stdout)
+	if runErr != nil {
+		result["status"] = "error"
+		warnings := []string{}
+		if strings.TrimSpace(runResult.Stderr) != "" {
+			warnings = append(warnings, strings.TrimSpace(runResult.Stderr))
+		}
+		result["warnings"] = warnings
+		if rootOpts.output == "json" {
+			_ = output(result)
+		}
+		return normalizeRemoteError("consul kv put", target.Name, runResult, runErr)
+	}
+	return output(result)
+}
+
+func runConsulSnapshotSave(path, address, datacenter string) error {
+	_, target, targetAddr, consulAddr, exec, err := resolveConsulExecution(address)
+	if err != nil {
+		return err
+	}
+	result := map[string]any{
+		"command":    "consul snapshot save",
+		"cluster":    clusterName(),
+		"target":     target.Name,
+		"dry_run":    rootOpts.dryRun,
+		"status":     "ok",
+		"result":     nil,
+		"warnings":   []string{},
+		"address":    consulAddr,
+		"datacenter": strings.TrimSpace(datacenter),
+		"path":       strings.TrimSpace(path),
+	}
+	if rootOpts.dryRun {
+		result["status"] = "planned"
+		result["result"] = map[string]any{"would_save_snapshot_to": strings.TrimSpace(path)}
+		return output(result)
+	}
+	if exec == nil {
+		return fmt.Errorf("unable to resolve SSH executor; pass --config with valid ssh settings or ensure inventory has SSH credentials")
+	}
+	cmd, secrets := buildConsulSnapshotCommand("save", strings.TrimSpace(path), consulAddr, strings.TrimSpace(datacenter))
+	runResult, runErr := exec.Run(context.Background(), targetAddr, remoteexec.Command{Command: cmd, Sudo: true, Secrets: secrets})
+	if strings.TrimSpace(runResult.Stdout) != "" {
+		result["result"] = strings.TrimSpace(runResult.Stdout)
+	}
+	if runErr != nil {
+		result["status"] = "error"
+		if rootOpts.output == "json" {
+			_ = output(result)
+		}
+		return normalizeRemoteError("consul snapshot save", target.Name, runResult, runErr)
+	}
+	return output(result)
+}
+
+func runConsulSnapshotRestore(path, address, datacenter string) error {
+	inv, target, targetAddr, consulAddr, exec, err := resolveConsulExecution(address)
+	if err != nil {
+		return err
+	}
+	result := map[string]any{
+		"command":    "consul snapshot restore",
+		"cluster":    clusterName(),
+		"target":     target.Name,
+		"dry_run":    rootOpts.dryRun,
+		"status":     "ok",
+		"result":     nil,
+		"warnings":   []string{},
+		"address":    consulAddr,
+		"datacenter": strings.TrimSpace(datacenter),
+		"path":       strings.TrimSpace(path),
+	}
+	if rootOpts.dryRun {
+		result["status"] = "planned"
+		result["result"] = map[string]any{"would_restore_snapshot_from": strings.TrimSpace(path)}
+		return output(result)
+	}
+	if exec == nil {
+		return fmt.Errorf("unable to resolve SSH executor; pass --config with valid ssh settings or ensure inventory has SSH credentials")
+	}
+	if err := enforceConsulLiveSafety(inv, "consul snapshot restore "+strings.TrimSpace(path)); err != nil {
+		return err
+	}
+	cmd, secrets := buildConsulSnapshotCommand("restore", strings.TrimSpace(path), consulAddr, strings.TrimSpace(datacenter))
+	runResult, runErr := exec.Run(context.Background(), targetAddr, remoteexec.Command{Command: cmd, Sudo: true, Secrets: secrets})
+	if strings.TrimSpace(runResult.Stdout) != "" {
+		result["result"] = strings.TrimSpace(runResult.Stdout)
+	}
+	if runErr != nil {
+		result["status"] = "error"
+		if rootOpts.output == "json" {
+			_ = output(result)
+		}
+		return normalizeRemoteError("consul snapshot restore", target.Name, runResult, runErr)
+	}
+	return output(result)
+}
+
+func runNomadDrainNode(nodeID string, disable bool, region, datacenter, address string) error {
+	inv, target, targetAddr, nomadAddr, exec, err := resolveNomadExecution(address)
+	if err != nil {
+		return err
+	}
+	result := map[string]any{
+		"command":    "nomad drain-node",
+		"cluster":    clusterName(),
+		"target":     target.Name,
+		"dry_run":    rootOpts.dryRun,
+		"status":     "ok",
+		"result":     nil,
+		"warnings":   []string{},
+		"address":    nomadAddr,
+		"region":     strings.TrimSpace(region),
+		"datacenter": strings.TrimSpace(datacenter),
+		"node_id":    strings.TrimSpace(nodeID),
+		"disable":    disable,
+	}
+	if rootOpts.dryRun {
+		result["status"] = "planned"
+		result["result"] = map[string]any{"would_change_drain": strings.TrimSpace(nodeID), "disable": disable}
+		return output(result)
+	}
+	if exec == nil {
+		return fmt.Errorf("unable to resolve SSH executor; pass --config with valid ssh settings or ensure inventory has SSH credentials")
+	}
+	if err := enforceNomadLiveSafety(inv, "nomad drain-node "+strings.TrimSpace(nodeID)); err != nil {
+		return err
+	}
+	cmd := buildNomadDrainRemoteCommand(nomadAddr, strings.TrimSpace(region), strings.TrimSpace(nodeID), disable)
+	runResult, runErr := exec.Run(context.Background(), targetAddr, remoteexec.Command{Command: cmd, Sudo: true, Secrets: []string{nomadAuthToken()}})
+	if strings.TrimSpace(runResult.Stdout) != "" {
+		result["result"] = strings.TrimSpace(runResult.Stdout)
+	}
+	if runErr != nil {
+		result["status"] = "error"
+		if rootOpts.output == "json" {
+			_ = output(result)
+		}
+		return normalizeRemoteError("nomad drain-node", target.Name, runResult, runErr)
+	}
+	return output(result)
+}
+
+func buildNomadDrainRemoteCommand(address, region, nodeID string, disable bool) string {
+	parts := []string{}
+	if token := nomadAuthToken(); strings.TrimSpace(token) != "" {
+		parts = append(parts, "export NOMAD_TOKEN="+shellQuote(strings.TrimSpace(token)))
+	}
+	if strings.TrimSpace(region) != "" {
+		parts = append(parts, "export NOMAD_REGION="+shellQuote(strings.TrimSpace(region)))
+	}
+	action := "-enable"
+	if disable {
+		action = "-disable"
+	}
+	parts = append(parts, "nomad node drain "+action+" -yes -address="+shellQuote(strings.TrimSpace(address))+" "+shellQuote(strings.TrimSpace(nodeID)))
+	return strings.Join(parts, " && ")
+}
+
+func buildConsulCurlCommand(url, method, data string) (string, []string) {
+	parts := []string{"curl -fsS"}
+	secrets := []string{}
+	if strings.TrimSpace(method) != "" && !strings.EqualFold(method, "GET") {
+		parts = append(parts, "-X", shellQuote(strings.ToUpper(strings.TrimSpace(method))))
+	}
+	if token := consulAuthToken(); strings.TrimSpace(token) != "" {
+		parts = append(parts, "-H", shellQuote("X-Consul-Token: "+strings.TrimSpace(token)))
+		secrets = append(secrets, token)
+	}
+	if strings.TrimSpace(data) != "" {
+		parts = append(parts, "-d", shellQuote(data))
+	}
+	parts = append(parts, shellQuote(strings.TrimSpace(url)))
+	return strings.Join(parts, " "), secrets
+}
+
+func buildConsulSnapshotCommand(mode, path, address, datacenter string) (string, []string) {
+	parts := []string{}
+	secrets := []string{}
+	if token := consulAuthToken(); strings.TrimSpace(token) != "" {
+		parts = append(parts, "export CONSUL_HTTP_TOKEN="+shellQuote(strings.TrimSpace(token)))
+		secrets = append(secrets, token)
+	}
+	cmd := "consul snapshot " + strings.TrimSpace(mode) + " -http-addr=" + shellQuote(strings.TrimSpace(address))
+	if strings.TrimSpace(datacenter) != "" {
+		cmd += " -datacenter=" + shellQuote(strings.TrimSpace(datacenter))
+	}
+	cmd += " " + shellQuote(strings.TrimSpace(path))
+	parts = append(parts, cmd)
+	return strings.Join(parts, " && "), secrets
+}
+
+func nomadAuthToken() string {
+	if v := strings.TrimSpace(os.Getenv("NOMAD_TOKEN")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(os.Getenv("STACKFORGE_NOMAD_TOKEN"))
+}
+
+func consulAuthToken() string {
+	if v := strings.TrimSpace(os.Getenv("CONSUL_HTTP_TOKEN")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(os.Getenv("STACKFORGE_CONSUL_HTTP_TOKEN"))
+}
+
+func normalizeRemoteError(action, target string, runResult remoteexec.Result, runErr error) error {
+	if runErr == nil {
+		return nil
+	}
+	message := strings.TrimSpace(runResult.Stderr)
+	if message == "" {
+		message = strings.TrimSpace(runResult.Stdout)
+	}
+	if message == "" {
+		return fmt.Errorf("%s failed on %s: %w", action, target, runErr)
+	}
+	if len(message) > 240 {
+		message = message[:240] + "..."
+	}
+	return fmt.Errorf("%s failed on %s: %s (%w)", action, target, message, runErr)
+}
+
+func resolveConsulExecution(address string) (*inventory.Inventory, inventory.Node, string, string, *sfssh.Executor, error) {
+	inv, err := loadInventory()
+	if err != nil {
+		return nil, inventory.Node{}, "", "", nil, err
+	}
+	target, err := selectConsulNode(inv)
+	if err != nil {
+		return nil, inventory.Node{}, "", "", nil, err
+	}
+	targetAddr := targetAddress(target)
+	if strings.TrimSpace(targetAddr) == "" {
+		return nil, inventory.Node{}, "", "", nil, fmt.Errorf("node %s has no reachable address", target.Name)
+	}
+	consulAddr := consulAddressForRead(inv, strings.TrimSpace(address))
+	return inv, target, targetAddr, consulAddr, executorForInventory(inv), nil
+}
+
+func selectConsulNode(inv *inventory.Inventory) (inventory.Node, error) {
+	if inv == nil || len(inv.Nodes) == 0 {
+		return inventory.Node{}, fmt.Errorf("inventory has no nodes")
+	}
+	for _, n := range inv.Nodes {
+		if hasRole(n.Roles, "consul-server") {
+			return n, nil
+		}
+	}
+	return inv.Nodes[0], nil
+}
+
+func consulAddressForRead(inv *inventory.Inventory, override string) string {
+	override = strings.TrimSpace(override)
+	if override != "" {
+		return override
+	}
+	if inv != nil && len(inv.ConsulEndpoints) > 0 {
+		if endpoint := strings.TrimSpace(inv.ConsulEndpoints[0]); endpoint != "" {
+			return endpoint
+		}
+	}
+	return "http://127.0.0.1:8500"
+}
+
+func enforceConsulLiveSafety(inv *inventory.Inventory, confirmationText string) error {
+	if inv != nil && strings.EqualFold(strings.TrimSpace(inv.Environment), "production") && !rootOpts.confirmProduction {
+		return fmt.Errorf("live consul operation against production inventory requires --confirm-production")
+	}
+	if !rootOpts.yes {
+		return confirmText(confirmationText)
+	}
+	return nil
+}
+
+func urlQueryEscape(s string) string {
+	replacer := strings.NewReplacer(" ", "%20", "+", "%2B", "&", "%26", "=", "%3D")
+	return replacer.Replace(s)
+}
+
 func traefikCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "traefik", Short: "Traefik operations"}
 	for _, n := range []string{"status", "routes", "reload", "logs"} {
 		cmd.AddCommand(&cobra.Command{Use: n, RunE: refuseLive("traefik " + n)})
 	}
+	consulCatalog := &cobra.Command{Use: "consul-catalog", Short: "Traefik Consul Catalog diagnostics"}
+	consulCatalog.AddCommand(&cobra.Command{Use: "check", RunE: func(cmd *cobra.Command, args []string) error {
+		return runTraefikConsulCatalogCheck()
+	}})
+	cmd.AddCommand(consulCatalog)
 	cmd.AddCommand(&cobra.Command{Use: "lint-config PATH", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if err := traefiklint.LintFile(args[0]); err != nil {
 			return err
@@ -497,6 +1338,117 @@ func traefikCmd() *cobra.Command {
 		return nil
 	}})
 	return cmd
+}
+
+func runTraefikConsulCatalogCheck() error {
+	inv, err := loadInventory()
+	if err != nil {
+		return err
+	}
+	var cfg *config.Config
+	cfgLoaded := false
+	if strings.TrimSpace(rootOpts.configPath) != "" {
+		if c, cfgErr := config.Load(rootOpts.configPath); cfgErr == nil {
+			cfg = c
+			cfgLoaded = true
+		}
+	}
+	findings := buildTraefikConsulCatalogFindings(inv, cfg, cfgLoaded)
+	if exec := executorForInventory(inv); exec != nil && !rootOpts.dryRun {
+		findings = append(findings, runTraefikConsulCatalogLiveChecks(inv, exec)...)
+	}
+	status := "ok"
+	for _, finding := range findings {
+		if finding["severity"] == "blocker" {
+			status = "needs-attention"
+			break
+		}
+	}
+	result := map[string]any{
+		"command":  "traefik consul-catalog check",
+		"cluster":  clusterName(),
+		"target":   "traefik+consul",
+		"dry_run":  rootOpts.dryRun,
+		"status":   status,
+		"result":   map[string]any{"findings": findings},
+		"warnings": []string{},
+	}
+	return output(result)
+}
+
+func runTraefikConsulCatalogLiveChecks(inv *inventory.Inventory, exec *sfssh.Executor) []map[string]string {
+	findings := []map[string]string{}
+	traefikNode, traefikErr := selectTraefikNode(inv)
+	if traefikErr != nil {
+		return append(findings, map[string]string{"severity": "warning", "code": "live.traefik_node_unavailable", "message": traefikErr.Error()})
+	}
+	if addr := targetAddress(traefikNode); strings.TrimSpace(addr) != "" {
+		cmd := "curl -fsS http://127.0.0.1:8080/api/rawdata >/dev/null"
+		if _, err := exec.Run(context.Background(), addr, remoteexec.Command{Command: cmd, Sudo: true}); err != nil {
+			findings = append(findings, map[string]string{"severity": "warning", "code": "live.traefik_api_unreachable", "message": "unable to query Traefik rawdata API on selected traefik node"})
+		} else {
+			findings = append(findings, map[string]string{"severity": "info", "code": "live.traefik_api_ok", "message": "Traefik rawdata API responded on selected traefik node"})
+		}
+	}
+	consulNode, consulErr := selectConsulNode(inv)
+	if consulErr != nil {
+		return append(findings, map[string]string{"severity": "warning", "code": "live.consul_node_unavailable", "message": consulErr.Error()})
+	}
+	if addr := targetAddress(consulNode); strings.TrimSpace(addr) != "" {
+		cmd, secrets := buildConsulCurlCommand("http://127.0.0.1:8500/v1/catalog/services", "GET", "")
+		if _, err := exec.Run(context.Background(), addr, remoteexec.Command{Command: cmd, Sudo: true, Secrets: secrets}); err != nil {
+			findings = append(findings, map[string]string{"severity": "warning", "code": "live.consul_catalog_unreachable", "message": "unable to query Consul catalog services on selected consul node"})
+		} else {
+			findings = append(findings, map[string]string{"severity": "info", "code": "live.consul_catalog_ok", "message": "Consul catalog services endpoint responded on selected consul node"})
+		}
+	}
+	return findings
+}
+
+func buildTraefikConsulCatalogFindings(inv *inventory.Inventory, cfg *config.Config, cfgLoaded bool) []map[string]string {
+	findings := []map[string]string{}
+	if inv == nil {
+		return []map[string]string{{"severity": "blocker", "code": "inventory.missing", "message": "inventory is not available"}}
+	}
+	hasTraefikNode := false
+	for _, n := range inv.Nodes {
+		if hasRole(n.Roles, "traefik") {
+			hasTraefikNode = true
+			break
+		}
+	}
+	if !hasTraefikNode {
+		findings = append(findings, map[string]string{"severity": "blocker", "code": "traefik.node_missing", "message": "no node with role traefik found in inventory"})
+	}
+	if len(inv.ConsulEndpoints) == 0 {
+		findings = append(findings, map[string]string{"severity": "blocker", "code": "consul.endpoint_missing", "message": "no consul endpoints discovered in inventory"})
+	}
+	if !cfgLoaded {
+		findings = append(findings, map[string]string{"severity": "warning", "code": "config.not_loaded", "message": "--config not provided or unreadable; provider-specific checks are limited"})
+		return findings
+	}
+	if cfg != nil {
+		if cfg.Traefik.DashboardEnabled && !cfg.Traefik.DashboardBasicAuth {
+			findings = append(findings, map[string]string{"severity": "warning", "code": "traefik.dashboard_auth", "message": "dashboard is enabled without basic auth"})
+		}
+		findings = append(findings, map[string]string{"severity": "info", "code": "provider.prefix", "message": "verify Traefik Consul Catalog provider prefix/tag conventions match your service tags"})
+		findings = append(findings, map[string]string{"severity": "info", "code": "provider.refresh_interval", "message": "set a sane consul catalog refresh interval and throttle to avoid noisy reloads"})
+		findings = append(findings, map[string]string{"severity": "info", "code": "provider.exposed_by_default", "message": "prefer exposedByDefault=false and explicit traefik.enable tags for least surprise"})
+		findings = append(findings, map[string]string{"severity": "info", "code": "provider.connect_aware", "message": "enable connect-aware settings when using Consul Connect service mesh"})
+	}
+	return findings
+}
+
+func selectTraefikNode(inv *inventory.Inventory) (inventory.Node, error) {
+	if inv == nil || len(inv.Nodes) == 0 {
+		return inventory.Node{}, fmt.Errorf("inventory has no nodes")
+	}
+	for _, n := range inv.Nodes {
+		if hasRole(n.Roles, "traefik") {
+			return n, nil
+		}
+	}
+	return inv.Nodes[0], nil
 }
 
 func dbCmd() *cobra.Command {
